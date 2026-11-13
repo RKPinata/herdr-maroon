@@ -247,5 +247,18 @@
     16
   ],
   "terminal_menu": "my-menu",
-  "toast": "my-toast"
+  "toast": "my-toast",
+  "floating": [
+    {
+      "id": "my-nvim-sync",
+      "content": {
+        "mod": "my-nvim",
+        "props": {
+          "role": "sync"
+        }
+      },
+      "edge": "bottom",
+      "align": "end"
+    }
+  ]
 }

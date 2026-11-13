@@ -80,16 +80,20 @@ A row's status mark cross-fades over 250ms. The status bar counts blocked agents
 
 - **Tab.** A click runs `tab.select`. A double-click runs `tab.rename`. A drag runs `tab.move`. A right-click opens `my-menu`: Rename, New tab, Close. The wheel runs `tab.prev` / `tab.next`. × runs `tab.close`.
 - **"+"** opens `my-new-menu` (250×512 popup): Terminal, Start an agent (installed agents, keys 1–9), Resume a session (Claude Code and Codex sessions of the space's folder), New space, New worktree…, Open worktree….
+- **Files** (`my-filer-pro`). A click on a text or markdown file opens it in the tab's nvim (`my-nvim open --tab`), and so does the viewer's Edit key. Images, PDFs and HTML open in the viewer. Without `my-nvim` installed, the viewer shows every file.
 - **Panel segment.** A click runs `layout.select {stack: "panel-body", child}` and `layout.show {id: "panel"}`. Clicking the active segment runs `layout.hide`. Each space remembers its panel.
 - **"↗"** opens a "Review" tab with the full Changes review, or goes to the one already open.
 
 **Panes.** A header click runs `pane.focus`. On hover the header shows split right, split down, zoom and close keys (`pane.split`, `pane.zoom`, `pane.close`). A terminal right-click opens `my-menu`: Split right, Split down, Zoom, Send right-clicks to pane, Send back to <parent>, Move to… (space, then tab), Close pane. ↑/↓ move, Enter runs, Esc closes.
+
+**nvim** (`my-nvim`). Each tab has one persistent nvim, started with the person's own `~/.config/nvim`. `mod.open:my-nvim` opens it as a full-height pane right of the tab's panes, or puts it away. Put away, it keeps running, so buffers, cursor and language servers come back as they were. Closing the tab stops it. `my-nvim.pick` opens an 820×470 dialog listing the files the tab's agent read and edited, newest first, then uncommitted git changes; typing fuzzy-searches the repo, and ⏎ opens the file in nvim. In nvim, `ctrl-k` then `c` comments the line or selection, `l` lists comments, `s` pastes them into the agent's input, `S` sends them, `i` puts `path:line` at the agent's cursor. These keys work in insert and select mode. On nvim's pane header, a Preview key shows a markdown file, image or SVG rendered in nvim's place; Source (nvim for an image) brings nvim back.
 
 **Toasts** (`my-toast`): a dot by level (error red, warning `#b45309`, success blue, info maroon), title 13px semibold, body 12px. A click runs its action. A "needs login" toast shows the `hc machine login` command with a Copy key.
 
 **Keys.** No bindings ship.
 
 - `mod.open:agent-switcher` opens the agent switcher, a 460px dialog of agents, most recent first. Bound to `ctrl-tab`, holding Ctrl and pressing Tab or Shift+Tab moves (`agent-switcher.next`, `agent-switcher.prev` in a `mod:agent-switcher` section). Releasing Ctrl runs `agent.focus`.
+- `mod.open:my-nvim` opens or puts away the tab's nvim (`cmd-e` here). `my-nvim.pick` opens the agent's files (`cmd-o` here).
 - `mod.open:agent-resume` opens Agent resume. It types `claude --resume <id>` or `codex resume <id>` into each terminal that lost its agent and sits at a shell, then reports in a toast.
 
 ## Built from
@@ -118,6 +122,8 @@ root row          bg canvas · divider 1 border · titlebar none · traffic_ligh
    │        ├─ timeline   my-timeline
    │        └─ linear     linear
    └─ status   my-workspace-status                            28px
+floating
+└─ my-nvim-sync  my-nvim {role: "sync"}  edge bottom · align end · no size
 ```
 
 Pane frame on `main`:
@@ -130,7 +136,7 @@ Pane frame on `main`:
 
 **Look.** The layout sets no theme or fonts. `settings.json` does: `"appearance": "light"`, `"theme": {"light": "maroon", "dark": "graphite"}`, `"font": "Monaspace Neon"`, `"font_size": 14.5`, `"font_ligatures": false`, `"ui_font": "IBM Plex Mono"`, `"zoom": 1.1`, `"minimum_contrast": 1`. The theme is `themes/maroon.json`.
 
-**`boxy.js`.** One 40-line file exports `boxy(t, id, content, {kind, onClick, h, px, size, gap, disabled, l, r, rl, rr})` and `card(t, el, on, radius)`. It draws every boxed key and selected-row card above. Mods import it as `./boxy.js`, so each mod that draws keys holds an identical copy: `linear`, `my-agents`, `my-annotator`, `my-annotator-tabs`, `my-filer-pro`, `my-pane`, `my-pr-flow`, `my-spaces`, `my-toast`, `my-workspace-chrome`, `my-workspace-status`.
+**`boxy.js`.** One 40-line file exports `boxy(t, id, content, {kind, onClick, h, px, size, gap, disabled, l, r, rl, rr})` and `card(t, el, on, radius)`. It draws every boxed key and selected-row card above. Mods import it as `./boxy.js`, so each mod that draws keys holds an identical copy: `linear`, `my-agents`, `my-annotator`, `my-annotator-tabs`, `my-filer-pro`, `my-nvim`, `my-pane`, `my-pr-flow`, `my-spaces`, `my-toast`, `my-workspace-chrome`, `my-workspace-status`.
 
 **Mods, and what each runs:**
 
@@ -141,7 +147,7 @@ Pane frame on `main`:
 | my-agents | agents list | `python3 -I claude-info.py` every 5s while a Claude Code agent runs (reads `~/.claude`, writes `~/.cache/herdr-mods/agents`); `hc send` for clear + recap |
 | my-usage | usage rows | `sh` reading `~/.codex/sessions` and `~/.claude/plugins/store/account-rotator_*.json`; reads `~/.cache/herdr-mods/usage/claude.json`; every 30s |
 | my-annotator-tabs | tab bar | `herdr-app do tab.new` for "↗" |
-| my-pane | pane header | none |
+| my-pane | pane header; Preview / Source on my-nvim's panes | `mods/my-nvim/bin/my-nvim app-current` on an nvim pane |
 | my-filer-pro | Files panel; with `button` + `listen` it draws nothing, adds `filer-pro` to shared `workspace.panels` and answers `reveal` while the panel is hidden | `sh`, `git`, `rm`, `mkdir`; reads, writes, moves and deletes files where you browse; once a day `fetch` of `api.github.com/repos/Srv-02/herdr-filerpro/releases/latest` (setting `update_check`, on by default) |
 | my-annotator | Changes panel and the full Review tab | `~/.local/bin/herdr-annotator request <json>` (ops `snapshot`, `ask`, `order`, `order_models`, `github_read`, `github_reply`); `python3 ~/.local/share/herdr-annotator/update.py`; `herdr-app do tab.new` |
 | my-pr-flow | PRs panel; `merge: "merge"` turns on a merge key (two presses) | `gh` (api, graphql, `pr`), `git`, `ssh -G`, `open`; posts a PR comment or merges only on your press; once a day `gh api repos/jjangsky/herdr-pr-flow/releases/latest` |
@@ -152,6 +158,7 @@ Pane frame on `main`:
 | my-new-menu | "+" popup | `sh` with `jq` over `~/.claude/projects`, `sqlite3` over `~/.codex/state_5.sqlite`; `knownAgents()` |
 | my-worktree | New / Open / Remove worktree dialogs | `git worktree add/list/remove`; new worktrees go to `~/.herdr/worktrees/<repo>/<branch>` |
 | my-toast | notifications | none |
+| my-nvim | the tab's nvim: the `my-nvim-sync` block takes `my-nvim.pick` and the Preview / Source swap; an overlay for `mod.open:my-nvim`; the picker's title bar; the preview pane; the welcome and "Neovim is needed" cards | `mods/my-nvim/bin/my-nvim`, a wrapper `scripts/install-nvim.sh` writes around the binary built from `nvim/`. It runs one headless `nvim` per tab, `hc`, `git`, and reads the agent's session logs (Claude Code, pi). No network |
 | agent-switcher | `ctrl-tab` dialog | none |
 | agent-resume | `ctrl-shift-r` popup | `python3 agent_resume.py resume`, which runs `hc`, `ps`, `sysctl` |
 
@@ -163,13 +170,14 @@ Pane frame on `main`:
 
 - **The look lives in settings.json.** The layout root has no `theme`, `font` or `ui_font`. Merge the settings above, or the build shows `paper` and Herdr's fonts. `themes/maroon.json` shares the layout's name, so Settings offers it only on this layout.
 - **Fonts are not shipped.** Install Monaspace Neon and IBM Plex Mono. A missing terminal font falls back to JetBrains Mono.
-- **Keep `boxy.js` identical.** Eleven mods hold a copy. A change to one must go to all.
+- **Keep `boxy.js` identical.** Twelve mods hold a copy. A change to one must go to all.
 - **Paths cross mods.** Most mods load icons from `mods/my-workspace-chrome/`. The tab bar loads `mods/my-pane/close.svg` and each panel mod's icon. A name clash breaks these paths. `scripts/rename-prefix.sh my- <new-prefix>` renames every `my-*` mod and rewrites every reference.
 - **Block ids are fixed.** The tab bar reads `sidebar`, `panel`, `panel-body` and the stack children `filer-pro`, `changes`, `prs`, `timeline`, `linear`. A segment shows only when its child exists. Changes shows only while shared `workspace.panels` holds `changes` (default `["files", "changes"]`).
 - **Blocks size themselves.** `my-spaces` and `my-usage` call `layout.resize` on their own block. The spaces fit ignores gaps and dividers, so do not add any to the sidebar.
 - **Outside helpers.** Changes needs the `herdr-annotator` binary at `~/.local/bin/herdr-annotator` and its `update.py`, from `github.com/jakub-tucek/herdr-annotator`. Linear needs a key in the macOS Keychain: `security add-generic-password -U -s herdr-linear -a "$USER" -w`. PRs and the spaces' GitHub counts need `gh` logged in. Agents, Timeline and Agent resume need `python3`. Resume sessions need `jq` and `sqlite3`.
 - **Claude usage needs a status line.** The Claude row reads what `mods/my-usage/claude-statusline.sh` writes. Set it as Claude Code's `statusLine` command. It then runs the claude-hud plugin with `bun` from PATH, else `~/.bun/bin/bun`.
 - **Agent resume needs hooks.** `resume` acts on terminals labeled by `agent_resume.py hook <agent>`. Without the hooks it finds only Claude Code sessions it can adopt from `~/.claude/sessions`.
+- **my-nvim is built, not copied.** `scripts/install-nvim.sh` builds `nvim/` with cargo, puts the runtime in `~/.local/share/my-nvim/app/<stamp>`, copies `mods/my-nvim` and writes its `bin/my-nvim` wrapper. A plain `cp -R mods/*` leaves the mod without that wrapper. A tab's nvim keeps the runtime it started with until its tab closes. Settings live in `~/.config/my-nvim/config.toml`.
 - **Projects folder.** "Not open" scans `~/Repo`. A `projects` prop on the `spaces` block changes it.
 
 ## Done when
@@ -183,4 +191,7 @@ Pane frame on `main`:
 - Clicking Files, Changes, PRs, Timeline or Linear opens that panel at 368px. Clicking it again hides the panel. Switching spaces brings back each space's panel.
 - The sidebar key folds the sidebar to 76px on macOS (44px elsewhere) and back to its last width.
 - Right-clicking a terminal opens `my-menu` with "Split right" first. Toasts come from `my-toast`.
+- `cmd-e` opens the tab's nvim beside its panes. `cmd-e` again puts it away, and the next `cmd-e` brings back the same buffers at once. A text file clicked in Files opens in it.
+- `cmd-o` over an agent that edited files lists them newest first. ⏎ opens one in nvim.
+- `ctrl-k c` in nvim, typed in insert mode, then `ctrl-k S`: the agent gets the comment with its `file:line`.
 - `ctrl-tab` opens the agent switcher. Releasing Ctrl focuses the picked agent.

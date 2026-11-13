@@ -1,0 +1,780 @@
+//! `pick-file` orchestration: the agent's output, the picker, and the tab's
+//! nvim.
+//!
+//! Two phases share one entry point ([`pick_file_cmd`]), selected by argv:
+//!
+//! * **Phase 1 (action)** — `my-nvim pick-file`. Resolves the target agent
+//!   pane, reads its recent output, extracts file-path [`Candidate`]s, and (if
+//!   any) writes a [`Handoff`] to a temp file and opens the picker popup.
+//! * **Phase 2 (finisher)** — `my-nvim pick-file --finish <handoff>`. Spawned
+//!   detached by the picker once the user picks. Ensures the sidebar is open in
+//!   the invoking tab, opens the chosen file in that tab's nvim daemon, focuses
+//!   the sidebar, and deletes the handoff file.
+//!
+//! Only the pure selection rule [`target_agent_pane`] is unit tested; the two
+//! phases are exercised by the e2e suites (TUI and `herdr-app/e2e`).
+
+use std::{
+    collections::HashSet,
+    env,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    process::Command,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::{bail, Context, Result};
+
+use crate::{
+    candidates::{self, BuildInput, Candidate},
+    config, daemon, extract, gitscan,
+    herdr::{self, Herdr},
+    host::{self, Opened, Pick},
+    maneuver::Ctx,
+    pathkey,
+    picker::Handoff,
+    sessions,
+};
+
+const PLUGIN_ID: &str = "chmarax.my-nvim";
+
+/// How long opening a file in the daemon may take. Longer than a plain
+/// request (`daemon::RPC_TIMEOUT`): it runs the file's autocmds (filetype,
+/// LSP attach), which a heavy config makes slow.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Entry point for the `pick-file` subcommand. Dispatches to the finisher when
+/// invoked as `pick-file --finish <handoff>`, otherwise runs the action phase.
+pub fn pick_file_cmd() -> Result<()> {
+    match finish_handoff_path(env::args()) {
+        Some(handoff) => finish_pick(&handoff),
+        None => start_pick(),
+    }
+}
+
+/// Extract the handoff path from a `--finish <path>` argument pair, if present.
+fn finish_handoff_path(args: impl Iterator<Item = String>) -> Option<String> {
+    let mut args = args;
+    while let Some(arg) = args.next() {
+        if arg == "--finish" {
+            return args.next();
+        }
+    }
+    None
+}
+
+/// Clamp the configured scrape depth to [`herdr::PaneScroll::cheap_read_limit`],
+/// so `pane read` never triggers herdr's slow, user-visible app-scroll
+/// fallback (~9s of pi's chat scrolling into the past at the default 300
+/// lines). Nothing is lost: deep file history still comes from session mining
+/// and git. `None` (older herdr without the scroll block in `pane get`) keeps
+/// the configured value unchanged.
+fn effective_scan_lines(configured: u32, scroll: Option<herdr::PaneScroll>) -> u32 {
+    scroll.map_or(configured, |scroll| {
+        configured.min(scroll.cheap_read_limit())
+    })
+}
+
+/// Selection rule for which agent pane to read.
+///
+/// * If the currently `focused` pane is itself an agent, use it.
+/// * Otherwise prefer an agent in the *same tab* as the focused pane -- when
+///   you trigger the picker from the nvim sidebar, the agent you mean is its
+///   tab-mate, not some unrelated first agent elsewhere in the workspace (that
+///   other agent's cwd would otherwise drive the git/repo-wide file search, so
+///   picking it silently searches the wrong repo).
+/// * Otherwise fall back to the first agent pane in `workspace`.
+/// * If the workspace has no agent panes, error.
+pub fn target_agent_pane(
+    h: &mut dyn Herdr,
+    workspace: &str,
+    tab: &str,
+    focused: &str,
+) -> Result<String> {
+    let agents = h.agents(workspace)?;
+    if let Some(agent) = agents.iter().find(|agent| agent.pane_id == focused) {
+        return Ok(agent.pane_id.clone());
+    }
+    if let Some(agent) = agents.iter().find(|agent| agent.tab_id == tab) {
+        return Ok(agent.pane_id.clone());
+    }
+    agents
+        .into_iter()
+        .next()
+        .map(|agent| agent.pane_id)
+        .with_context(|| format!("no agent panes found in workspace {workspace}"))
+}
+
+/// Phase 1: read the target agent pane, gather candidates from the three
+/// read-only layers (session mining, git worktree status, scrape), and open
+/// the picker (the host's own way: a TUI popup, or the app's dialog).
+/// `--list` prints the candidates instead.
+fn start_pick() -> Result<()> {
+    let host = host::ops();
+    let ctx = host.ctx()?;
+    let config = config::load();
+    let mut herdr = host.herdr();
+
+    let target = match target_agent_pane(&mut *herdr, &ctx.workspace, &ctx.tab, &ctx.focused_pane) {
+        Ok(target) => target,
+        Err(error) => return host.show_pick(Pick::NoAgent(error)),
+    };
+    let snapshot = herdr.pane_snapshot(&target)?;
+    let lines = effective_scan_lines(config.picker.scan_lines, snapshot.scroll);
+    let text = herdr.read_pane(&target, lines)?;
+
+    let cwd = snapshot.cwd;
+    let candidates = gather_candidates(snapshot.agent_session.as_ref(), &text, &cwd, &|path| {
+        path.is_file()
+    });
+
+    if env::args().any(|arg| arg == "--list") {
+        let session = snapshot.agent_session.map(|s| s.value);
+        println!(
+            "{}",
+            serde_json::json!({"agent": target, "session": session, "candidates": candidates})
+        );
+        return Ok(());
+    }
+    if candidates.is_empty() {
+        return host.show_pick(Pick::Nothing);
+    }
+
+    let handoff = Handoff {
+        candidates,
+        chosen: None,
+        workspace: ctx.workspace.clone(),
+        tab: ctx.tab.clone(),
+        focused_pane: ctx.focused_pane.clone(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        max_files: config.picker.max_files,
+    };
+    let handoff = write_handoff(&handoff)?;
+    host.show_pick(Pick::Ready { handoff, cwd })
+}
+
+/// Gather candidates from all three layers given the pane's already-fetched
+/// `agent_session` (see `Herdr::pane_snapshot`, which folds the `pane get`
+/// call this used to make itself into the one `start_pick` already made for
+/// the cwd). Never fails: any session-file read error, JSON parse failure,
+/// or git command failure degrades to the remaining layers (brief) -- this
+/// function's return type is `Vec<Candidate>`, not `Result`, on purpose.
+pub(crate) fn gather_candidates(
+    agent_session: Option<&herdr::AgentSession>,
+    scrape_text: &str,
+    cwd: &Path,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Vec<Candidate> {
+    let exists_str = |p: &str| {
+        let path = Path::new(p);
+        if path.is_absolute() {
+            exists(path)
+        } else {
+            exists(&cwd.join(path))
+        }
+    };
+
+    let session_text = agent_session.and_then(|s| sessions::load_session_text(s, cwd));
+    let agent_name = agent_session.map(|s| s.agent.as_str()).unwrap_or("");
+    // No session text mines nothing, like an agent without a parser.
+    let mined =
+        sessions::mine_session(agent_name, session_text.as_deref().unwrap_or(""), &|path| {
+            pathkey::resolve(path, cwd)
+        });
+
+    // git paths are `<toplevel>/<path>`; canonical so they match the mined
+    // and scraped paths below.
+    let toplevel = gitscan::toplevel(cwd).map(|top| pathkey::canonical(&top));
+    let git_dirty = toplevel
+        .as_deref()
+        .and_then(|top| gitscan::dirty_paths(top).ok())
+        .unwrap_or_default();
+    let git_committed = match (&toplevel, mined.first_op_unix) {
+        (Some(top), Some(since)) => gitscan::committed_since(top, since).unwrap_or_default(),
+        _ => HashSet::new(),
+    };
+    let in_git_worktree = |path: &str| {
+        toplevel
+            .as_deref()
+            .map(|top| Path::new(path).starts_with(top))
+            .unwrap_or(false)
+    };
+    let git_mtime_unix = |path: &str| {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+    };
+    // One bulk `git diff HEAD --numstat` for the whole worktree, not one
+    // `git diff`/`git diff --cached` pair per dirty file.
+    let diff_stats = toplevel
+        .as_deref()
+        .and_then(|top| gitscan::diff_numstat_by_path(top).ok())
+        .unwrap_or_default();
+    // Whole-worktree file list, used only to widen search once the user types
+    // (the default view stays session-only). Empty for non-git cwds.
+    let repo_files = toplevel
+        .as_deref()
+        .and_then(|top| gitscan::list_repo_files(top).ok())
+        .unwrap_or_default();
+
+    let mut scraped = extract::extract(scrape_text, cwd, exists);
+    for mention in &mut scraped {
+        // Already absolute; canonical so it matches the git and mined paths.
+        mention.path = pathkey::canonical(Path::new(&mention.path))
+            .to_string_lossy()
+            .into_owned();
+    }
+
+    candidates::build_candidates(BuildInput {
+        mined_touches: &mined.touches,
+        git_dirty: &git_dirty,
+        git_committed_in_session: &git_committed,
+        in_git_worktree: &in_git_worktree,
+        git_mtime_unix: &git_mtime_unix,
+        diff_stats: &diff_stats,
+        scraped_mentioned: &scraped,
+        repo_files: &repo_files,
+        exists: &exists_str,
+    })
+}
+
+/// Phase 2: act on the user's selection from the handoff file, then delete
+/// it, whatever came of it.
+fn finish_pick(handoff_path: &str) -> Result<()> {
+    let result = act_on_pick(handoff_path);
+    cleanup_handoff(handoff_path);
+    result
+}
+
+fn act_on_pick(handoff_path: &str) -> Result<()> {
+    let raw = std::fs::read_to_string(handoff_path)
+        .with_context(|| format!("reading handoff {handoff_path}"))?;
+    let handoff: Handoff =
+        serde_json::from_str(&raw).with_context(|| format!("parsing handoff {handoff_path}"))?;
+
+    // No selection (overlay dismissed): nothing to do.
+    let Some(chosen) = handoff.chosen else {
+        return Ok(());
+    };
+    let candidate = handoff
+        .candidates
+        .get(chosen)
+        .with_context(|| format!("handoff chosen index {chosen} out of range"))?;
+
+    let ctx = Ctx {
+        workspace: handoff.workspace.clone(),
+        tab: handoff.tab.clone(),
+        focused_pane: handoff.focused_pane.clone(),
+        // Reuse the same cwd already resolved (and carried in the handoff)
+        // for the picker's own path-display purposes -- not a second,
+        // independent cwd lookup.
+        cwd: PathBuf::from(&handoff.cwd),
+    };
+    open_in_sidebar(&ctx, &candidate.path, candidate.line).map(drop)
+}
+
+/// Ensure the sidebar is open in `ctx.tab`, open `path` (optionally at
+/// `line`) in that tab's nvim daemon, and focus the sidebar. Shared by the
+/// pick-file finisher above and (from a later task) `open-link`'s Ctrl+click
+/// handler — one behavior, two entry points.
+///
+/// A failure is also shown as a herdr notification: the user just picked or
+/// clicked a file, and the finisher's stderr goes nowhere.
+pub(crate) fn open_in_sidebar(ctx: &Ctx, path: &str, line: Option<u32>) -> Result<Opened> {
+    open_in_sidebar_at(ctx, path, line, None, true).inspect_err(|error| {
+        notify(&format!("Could not open {path}: {error:#}"));
+    })
+}
+
+/// `open_in_sidebar` with a column too (the app's `open` entry point), and
+/// without the focus when the caller gives it itself (`focus: false`).
+pub(crate) fn open_in_sidebar_at(
+    ctx: &Ctx,
+    path: &str,
+    line: Option<u32>,
+    col: Option<u32>,
+    focus: bool,
+) -> Result<Opened> {
+    let host = host::ops();
+    // A file nvim can't show (an image), shown rendered where the host can.
+    if host.preview(ctx, path)? {
+        return Ok(Opened::default());
+    }
+    let config = config::load();
+    // nvim's pane is open: its daemon runs, the open is the check (bounded,
+    // unstuck if needed): no health check first.
+    if let Some(pane) = host.shown_sidebar(ctx) {
+        open_in_nvim(
+            &daemon::registry::socket_path(&ctx.tab),
+            path,
+            line,
+            col,
+            &config.sidebar,
+        )?;
+        if focus {
+            host.focus(&pane);
+        }
+        return Ok(Opened { pane, notice: None });
+    }
+    // Bring the tab's daemon up *before* opening the sidebar. The sidebar pane
+    // runs its own `ensure_daemon`; doing ours first (to completion) means the
+    // sidebar reuses the already-healthy daemon rather than racing to
+    // spawn/bind a competing one on the same socket.
+    let plugin_root = daemon::plugin_root()?;
+    let socket = daemon::ensure_daemon(&ctx.tab, &plugin_root, &config, &host.nvim_folder(ctx))?;
+
+    let opened = host.ensure_sidebar(ctx)?;
+
+    open_in_nvim(&socket, path, line, col, &config.sidebar)?;
+    if focus {
+        host.focus(&opened.pane);
+    }
+    Ok(opened)
+}
+
+/// Open `path` (optionally at `line`) in the headless nvim daemon on `socket`.
+///
+/// Line jumping is asked for as `cursor(...)` rather than the tempting
+/// `--remote +<line> <path>`: nvim treats `--remote +5` as a *filename* (it opens
+/// a buffer literally named `+5` and leaves the cursor on line 1), so `+<line>`
+/// only works when *launching* nvim, not against a running server. An
+/// expression is also mode-independent (works even mid-insert) and needs no
+/// path escaping.
+fn open_in_nvim(
+    socket: &Path,
+    path: &str,
+    line: Option<u32>,
+    col: Option<u32>,
+    sidebar: &crate::config::Sidebar,
+) -> Result<()> {
+    // Open (or focus) the file and jump to the line, in one request: exactly
+    // what `--remote` does (`nvim_command('drop ' .. fnameescape(path))`, not
+    // silenced as `execute()` would), then `cursor()`.
+    let open = format!(
+        "nvim_command('drop ' . fnameescape({}))",
+        daemon::vim_string_literal(path)
+    );
+    let expr = match line {
+        Some(line) => format!("[{open}, cursor({line}, {})]", col.unwrap_or(1)),
+        None => format!("[{open}]"),
+    };
+    // Bounded, never waited on forever: a daemon that took the request and
+    // said nothing may only be waiting for input (a half-typed command, a
+    // swap-file prompt), so it is unstuck and asked once more; a busy or
+    // hung one gives up at the deadline and says so -- the notification the
+    // person sees for a file they picked or clicked.
+    let mut reply = daemon::remote_expr(socket, &expr, sidebar, OPEN_TIMEOUT)?;
+    if matches!(reply, daemon::Reply::TimedOut) {
+        daemon::unstick(socket, sidebar);
+        reply = daemon::remote_expr(socket, &expr, sidebar, daemon::RPC_TIMEOUT)?;
+    }
+    daemon::answer(socket, reply, OPEN_TIMEOUT)
+        .with_context(|| format!("could not open {path} in the tab's nvim"))?;
+    Ok(())
+}
+
+/// Open the picker as a floating popup pane, passing the handoff path via the
+/// environment.
+pub(crate) fn open_picker(handoff_path: &str) -> Result<()> {
+    let status = Command::new("herdr")
+        .args([
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            PLUGIN_ID,
+            "--entrypoint",
+            "picker",
+            "--placement",
+            "popup",
+            "--width",
+            "80",
+            "--height",
+            "20",
+            "--env",
+            &format!("MY_NVIM_HANDOFF={handoff_path}"),
+        ])
+        .status()
+        .context("failed to run herdr plugin pane open")?;
+    if !status.success() {
+        bail!("herdr plugin pane open failed (exit {status})");
+    }
+    Ok(())
+}
+
+/// Show a herdr notification (best-effort, falling back to stderr) that no file
+/// paths were found. Callers exit 0 after this — an empty result is not an error.
+pub(crate) fn notify_no_candidates() {
+    if !notify("No file paths found in agent output") {
+        eprintln!("my-nvim: no file paths found in agent output");
+    }
+}
+
+/// Show a herdr notification titled "my-nvim"; `false` if it could not be
+/// shown.
+fn notify(body: &str) -> bool {
+    Command::new("herdr")
+        .args(["notification", "show", "my-nvim", "--body", body])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Serialize `handoff` to a uniquely-named temp file, returning its path.
+pub(crate) fn write_handoff(handoff: &Handoff) -> Result<String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = env::temp_dir().join(format!(
+        "my-nvim-handoff-{}-{}.json",
+        std::process::id(),
+        nanos
+    ));
+    let encoded = serde_json::to_string(handoff).context("serializing handoff")?;
+    std::fs::write(&path, encoded)
+        .with_context(|| format!("writing handoff {}", path.display()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Delete the handoff temp file, ignoring a missing file.
+fn cleanup_handoff(handoff_path: &str) {
+    match std::fs::remove_file(handoff_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => eprintln!("my-nvim: could not remove handoff {handoff_path}: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use super::*;
+    use crate::herdr::{AgentInfo, MockHerdr};
+
+    fn agent(pane_id: &str, tab_id: &str, focused: bool) -> AgentInfo {
+        AgentInfo {
+            pane_id: pane_id.into(),
+            tab_id: tab_id.into(),
+            focused,
+        }
+    }
+
+    #[test]
+    fn focused_pane_that_is_an_agent_is_used() {
+        let mut h = MockHerdr {
+            agents_results: VecDeque::from([Ok(vec![
+                agent("wA:p1", "wA:t1", false),
+                agent("wA:p2", "wA:t1", true),
+            ])]),
+            ..Default::default()
+        };
+        assert_eq!(
+            target_agent_pane(&mut h, "wA", "wA:t1", "wA:p2").unwrap(),
+            "wA:p2"
+        );
+        assert_eq!(h.ops, ["agents wA"]);
+    }
+
+    #[test]
+    fn non_agent_focus_prefers_agent_in_the_same_tab() {
+        let mut h = MockHerdr {
+            agents_results: VecDeque::from([Ok(vec![
+                // First-in-workspace agent, but in a different tab (e.g. another
+                // repo) -- must NOT win over the tab-mate below.
+                agent("wA:p1", "wA:t9", false),
+                agent("wA:p2", "wA:t1", false),
+            ])]),
+            ..Default::default()
+        };
+        // Focused pane wA:sidebar isn't an agent, but it lives in tab wA:t1, so
+        // its tab-mate agent wA:p2 is chosen over the first-listed wA:p1.
+        assert_eq!(
+            target_agent_pane(&mut h, "wA", "wA:t1", "wA:sidebar").unwrap(),
+            "wA:p2"
+        );
+    }
+
+    #[test]
+    fn non_agent_focus_falls_back_to_first_agent_when_no_tab_match() {
+        let mut h = MockHerdr {
+            agents_results: VecDeque::from([Ok(vec![
+                agent("wA:p1", "wA:t3", false),
+                agent("wA:p2", "wA:t4", false),
+            ])]),
+            ..Default::default()
+        };
+        // No agent in the focused pane's tab (wA:t9), so the first agent wins.
+        assert_eq!(
+            target_agent_pane(&mut h, "wA", "wA:t9", "wA:p9").unwrap(),
+            "wA:p1"
+        );
+    }
+
+    #[test]
+    fn no_agents_is_an_error() {
+        let mut h = MockHerdr {
+            agents_results: VecDeque::from([Ok(vec![])]),
+            ..Default::default()
+        };
+        assert!(target_agent_pane(&mut h, "wA", "wA:t1", "wA:p9").is_err());
+    }
+
+    #[test]
+    fn effective_scan_lines_clamps_to_viewport_for_alt_screen_panes() {
+        // pi pane: no host scrollback, so anything past the viewport would
+        // trigger herdr's slow app-scroll fallback.
+        let scroll = crate::herdr::PaneScroll {
+            viewport_rows: 73,
+            max_offset_from_bottom: 0,
+        };
+        assert_eq!(effective_scan_lines(300, Some(scroll)), 73);
+    }
+
+    #[test]
+    fn effective_scan_lines_allows_host_scrollback_when_present() {
+        let scroll = crate::herdr::PaneScroll {
+            viewport_rows: 34,
+            max_offset_from_bottom: 3459,
+        };
+        assert_eq!(effective_scan_lines(300, Some(scroll)), 300);
+    }
+
+    #[test]
+    fn effective_scan_lines_keeps_configured_value_without_scroll_info() {
+        assert_eq!(effective_scan_lines(300, None), 300);
+    }
+
+    #[test]
+    fn effective_scan_lines_never_raises_a_small_configured_value() {
+        let scroll = crate::herdr::PaneScroll {
+            viewport_rows: 73,
+            max_offset_from_bottom: 500,
+        };
+        assert_eq!(effective_scan_lines(50, Some(scroll)), 50);
+    }
+
+    // A finisher that fails must not leave its handoff file in the temp dir:
+    // with a hung daemon (issue #61), every pick would leave one more.
+    #[test]
+    fn a_failed_finish_still_removes_its_handoff() {
+        let dir = env::temp_dir().join(format!("hn-handoff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out_of_range = Handoff {
+            candidates: Vec::new(),
+            chosen: Some(3),
+            workspace: "w1".into(),
+            tab: "w1:t1".into(),
+            focused_pane: "w1:p1".into(),
+            cwd: dir.to_string_lossy().into_owned(),
+            max_files: 10,
+        };
+        for (name, contents) in [
+            (
+                "out-of-range.json",
+                serde_json::to_string(&out_of_range).unwrap(),
+            ),
+            ("garbled.json", "{not json".to_owned()),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, contents).unwrap();
+            assert!(finish_pick(&path.to_string_lossy()).is_err(), "{name}");
+            assert!(!path.exists(), "{name}: handoff left behind");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_finish_handoff_argument() {
+        let args = ["my-nvim", "pick-file", "--finish", "/tmp/h.json"]
+            .into_iter()
+            .map(String::from);
+        assert_eq!(finish_handoff_path(args).as_deref(), Some("/tmp/h.json"));
+    }
+
+    #[test]
+    fn no_finish_argument_is_phase_one() {
+        let args = ["my-nvim", "pick-file"].into_iter().map(String::from);
+        assert!(finish_handoff_path(args).is_none());
+    }
+
+    #[test]
+    fn gather_candidates_falls_back_to_scrape_when_no_agent_session() {
+        let text = "see /tmp/does-not-exist-ever.rs";
+        let cwd = std::path::Path::new("/tmp");
+        let out = gather_candidates(None, text, cwd, &|_| false);
+        assert!(out.is_empty());
+    }
+
+    /// A throwaway git repo with `src/greet.js` (edited, uncommitted) and
+    /// `src/notes.md` (clean). Deleted on drop.
+    struct Repo {
+        root: PathBuf,
+        path: PathBuf,
+    }
+
+    impl Repo {
+        fn new(name: &str) -> Self {
+            let root = env::temp_dir().join(format!("hn-gather-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let path = root.join("repo");
+            std::fs::create_dir_all(path.join("src")).unwrap();
+            let git = |args: &[&str]| {
+                // Ignore the developer's git config (commit signing, hooks).
+                let out = std::process::Command::new("git")
+                    // Git for Windows maps `/dev/null` to `NUL` itself.
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .arg("-C")
+                    .arg(&path)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "git {args:?}: {out:?}");
+            };
+            git(&["init", "-q"]);
+            std::fs::write(path.join("src/greet.js"), "hello\n").unwrap();
+            std::fs::write(path.join("src/notes.md"), "notes\n").unwrap();
+            git(&["add", "."]);
+            git(&[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "init",
+            ]);
+            std::fs::write(path.join("src/greet.js"), "hello\nbye\n").unwrap();
+            // git reports the toplevel's real path, so expectations use it too
+            // (macOS temp dirs sit behind the /var -> /private/var symlink).
+            let path = pathkey::canonical(&path);
+            Self { root, path }
+        }
+
+        /// `rel` (written with `/`) under the repo, spelled the way the
+        /// picker spells it: native separators, like `gitscan` produces.
+        fn file(&self, rel: &str) -> String {
+            let native = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+            self.path.join(native).to_string_lossy().into_owned()
+        }
+
+        /// A pi session file whose assistant turns call `(tool, path)` in order.
+        fn pi_session(&self, cwd: &Path, calls: &[(&str, &str)]) -> crate::herdr::AgentSession {
+            let header = serde_json::json!({
+                "type": "session", "version": 3, "id": "s",
+                "timestamp": "2026-07-22T11:07:49.944Z", "cwd": cwd,
+            });
+            let mut text = format!("{header}\n");
+            for (i, (tool, path)) in calls.iter().enumerate() {
+                let record = serde_json::json!({
+                    "type": "message", "id": format!("m{i}"), "parentId": null,
+                    "timestamp": format!("2026-07-22T11:08:0{i}.000Z"),
+                    "message": {"role": "assistant", "content": [{
+                        "type": "toolCall", "id": format!("t{i}"), "name": tool,
+                        "arguments": {"path": path},
+                    }]},
+                });
+                text.push_str(&format!("{record}\n"));
+            }
+            let file = self.root.join("session.jsonl");
+            std::fs::write(&file, text).unwrap();
+            crate::herdr::AgentSession {
+                agent: "pi".into(),
+                kind: "path".into(),
+                value: file.to_string_lossy().into_owned(),
+            }
+        }
+    }
+
+    impl Drop for Repo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The picker's default view: (path, is_edit, diff_stat, line) per row.
+    fn session_rows(
+        session: Option<&crate::herdr::AgentSession>,
+        scrape: &str,
+        cwd: &Path,
+    ) -> Vec<(String, bool, Option<(u32, u32)>, Option<u32>)> {
+        gather_candidates(session, scrape, cwd, &|path| path.exists())
+            .into_iter()
+            .filter(|c| c.session)
+            .map(|c| (c.path, c.is_edit, c.diff_stat, c.line))
+            .collect()
+    }
+
+    /// One file on disk is one picker row, whichever way the agent spelled
+    /// its path. git always reports `<toplevel>/<path>`; pi logs the path the
+    /// model wrote, which pi itself resolves against its cwd after dropping a
+    /// leading `@`.
+    #[test]
+    fn gather_candidates_lists_an_agent_edited_file_once() {
+        let repo = Repo::new("spellings");
+        let greet = repo.file("src/greet.js");
+        let src = repo.path.join("src");
+        let cases: [(&str, &Path, Vec<(&str, &str)>); 5] = [
+            ("relative", &repo.path, vec![("edit", "src/greet.js")]),
+            ("dot-relative", &repo.path, vec![("edit", "./src/greet.js")]),
+            ("dot-dot", &src, vec![("edit", "../src/greet.js")]),
+            ("at-prefixed", &repo.path, vec![("edit", "@src/greet.js")]),
+            (
+                "read absolute, edit relative",
+                &repo.path,
+                vec![("read", greet.as_str()), ("edit", "src/greet.js")],
+            ),
+        ];
+        for (name, cwd, calls) in cases {
+            let session = repo.pi_session(cwd, &calls);
+            assert_eq!(
+                session_rows(Some(&session), "", cwd),
+                vec![(greet.clone(), true, Some((1, 0)), None)],
+                "{name}"
+            );
+        }
+    }
+
+    /// A file the agent only read (clean in git) is listed under its real path.
+    #[test]
+    fn gather_candidates_keeps_a_read_only_touch_whatever_its_spelling() {
+        let repo = Repo::new("read-only");
+        let session = repo.pi_session(&repo.path, &[("read", "@src/notes.md")]);
+        let rows = session_rows(Some(&session), "", &repo.path);
+        assert!(
+            rows.iter()
+                .any(|(path, ..)| *path == repo.file("src/notes.md")),
+            "{rows:?}"
+        );
+    }
+
+    /// The pane's cwd reached through a symlinked directory still names the
+    /// same files git reports under the real toplevel.
+    #[cfg(unix)]
+    #[test]
+    fn gather_candidates_dedupes_paths_under_a_symlinked_cwd() {
+        let repo = Repo::new("symlink");
+        let link = repo.root.join("link");
+        std::os::unix::fs::symlink(&repo.path, &link).unwrap();
+        let session = repo.pi_session(&link, &[("edit", "src/greet.js")]);
+        assert_eq!(
+            session_rows(Some(&session), "", &link),
+            vec![(repo.file("src/greet.js"), true, Some((1, 0)), None)]
+        );
+    }
+
+    /// Without an agent session (a plain shell pane) the scraped mention and
+    /// git's dirty entry are the same file: one row, keeping the line number.
+    #[test]
+    fn gather_candidates_merges_a_scraped_mention_into_the_git_row() {
+        let repo = Repo::new("scrape");
+        assert_eq!(
+            session_rows(None, "changed src/greet.js:2 just now", &repo.path),
+            vec![(repo.file("src/greet.js"), true, Some((1, 0)), Some(2))]
+        );
+    }
+}

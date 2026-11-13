@@ -1613,7 +1613,7 @@ export default class FilerPro extends View {
     if (!this.sourceShown()) return [];
     if (this.full) return editTools(t, { check: { state: "refused", reason: "Editing in full screen" }, edit: null }, {});
     return editTools(t, { check: this.editCheck, edit: this.edit }, {
-      onToggle: (cx) => (this.edit ? this.requestLeave(null, cx) : this.enterEdit(cx)),
+      onToggle: (cx) => (this.edit ? this.requestLeave(null, cx) : this.editsInNvim(this.file) ? this.openInNvim(this.file, cx) : this.enterEdit(cx)),
       onUndo: (cx) => this.step("undo", cx), onRedo: (cx) => this.step("redo", cx),
       onCancel: (cx) => this.cancelEdit(cx), onSave: (cx) => this.save(cx), onCopy: (cx) => this.openCopy(cx),
     });
@@ -1984,10 +1984,29 @@ export default class FilerPro extends View {
       return;
     }
     const action = fileClick(event, bundle ? this.conf.double_click_apps : this.conf.double_click_files);
+    if (action === "open" && !bundle && this.editsInNvim(path)) { this.openInNvim(path, cx); return; }
     if (action === "open" && !bundle) { this.show(path, cx); return; }
     if (!action) return;
     this.lastOpened = path; cx.notify();
     if (action === "open") openBundle(joinPath(this.root, path), { exec, notify, platform }).catch(() => {});
+  }
+
+  // Local text and markdown files are edited in the tab's nvim (my-nvim). Images, PDFs and HTML stay in the viewer.
+  editsInNvim(path) {
+    const kind = previewKind(path);
+    return !this.on && (!kind || kind === "markdown");
+  }
+
+  // Opens a file in the tab's nvim. Without my-nvim installed the viewer shows it instead.
+  openInNvim(path, cx) {
+    this.lastOpened = path; cx.notify();
+    const tab = focused()?.tab;
+    cx.spawn(async (cx) => {
+      const r = tab ? await exec(`${appHome()}/mods/my-nvim/bin/my-nvim`, ["open", "--tab", tab, joinPath(this.root, path)]).catch(() => null) : null;
+      if (r?.code === 0) return;
+      if (r) notify({ title: "Open in nvim", body: (r.stderr || r.stdout).trim().slice(-400), level: "error" });
+      this.show(path, cx);
+    });
   }
 
   // Opens a local file with the default app after the checks of lib/open.js (like Open in the menu). Never on a machine.

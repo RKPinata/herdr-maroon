@@ -24,9 +24,11 @@ Read README.md and RECIPE.md first, then:
 |---|---|---|
 | `layouts/maroon.json` | `~/.config/herdr-app/layouts/` | The window: sidebar, tab bar, panes, side panels |
 | `themes/maroon.json` | `~/.config/herdr-app/themes/` | Light theme, accent `#a01d2a` |
-| `mods/` | `~/.config/herdr-app/mods/` | 15 `my-*` mods, plus `linear`, `agent-switcher`, `agent-resume` |
+| `mods/` | `~/.config/herdr-app/mods/` | 16 `my-*` mods, plus `linear`, `agent-switcher`, `agent-resume` |
+| `nvim/` | built by `scripts/install-nvim.sh` | Source of `my-nvim`'s binary and Lua plugin (Rust, MIT, from ChmaraX/herdr-nvim) |
 | `settings.json` | merge into `~/.config/herdr-app/settings.json` | Fonts, zoom, theme per appearance |
 | `scripts/rename-prefix.sh` | stays here | Renames every `my-*` mod and all references to it |
+| `scripts/install-nvim.sh` | stays here | Builds `nvim/` and installs `my-nvim` with its wrapper |
 
 ## Install
 
@@ -40,6 +42,7 @@ Read README.md and RECIPE.md first, then:
    cp layouts/maroon.json "$H/layouts/"
    cp themes/maroon.json "$H/themes/"
    cp -R mods/* "$H/mods/"
+   scripts/install-nvim.sh
    ```
 3. Merge `settings.json` into yours by hand.
 4. Check each mod:
@@ -53,8 +56,8 @@ An agent can do all of this. Point it at this folder and the section "Layouts an
 ## What it needs
 
 - **Fonts:** Monaspace Neon (terminal) and IBM Plex Mono (UI).
-- **Programs:** `git`, `gh` (signed in), `python3`, `jq`. `node` for Mermaid previews in `my-filer-pro`.
-- **Keys:** no bindings ship. Bind `mod.open:agent-switcher` (for example `ctrl-tab`) and `mod.open:agent-resume` in your `keys.json`. Inside the switcher, `agent-switcher.next` and `agent-switcher.prev` move.
+- **Programs:** `git`, `gh` (signed in), `python3`, `jq`. `node` for Mermaid previews in `my-filer-pro`. Neovim 0.10+ and Rust (`rustup`) for `my-nvim`.
+- **Keys:** no bindings ship. Bind `mod.open:agent-switcher` (for example `ctrl-tab`), `mod.open:agent-resume`, `mod.open:my-nvim` (for example `cmd-e`) and `my-nvim.pick` (for example `cmd-o`) in your `keys.json`. Inside the switcher, `agent-switcher.next` and `agent-switcher.prev` move.
 - **Projects folder:** `my-spaces` lists repos in `~/Repo`. Set the layout block's `projects` prop to use another folder.
 - **Linear:** the `linear` mod reads an API key from the macOS keychain, service `herdr-linear`. It is macOS only.
 - **Annotator helper:** `my-annotator` runs `~/.local/bin/herdr-annotator`. Install it from [jakub-tucek/herdr-annotator](https://github.com/jakub-tucek/herdr-annotator).
