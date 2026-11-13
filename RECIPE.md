@@ -87,12 +87,10 @@ A row's status mark cross-fades over 250ms. The status bar counts blocked agents
 
 **Toasts** (`my-toast`): a dot by level (error red, warning `#b45309`, success blue, info maroon), title 13px semibold, body 12px. A click runs its action. A "needs login" toast shows the `hc machine login` command with a Copy key.
 
-**Keys** (`keys.json`):
+**Keys.** No bindings ship.
 
-- `ctrl-tab` opens the agent switcher, a 460px dialog of agents, most recent first. Hold Ctrl and press Tab or Shift+Tab to move. Releasing Ctrl runs `agent.focus`.
-- `ctrl-shift-r` opens Agent resume. It types `claude --resume <id>` or `codex resume <id>` into each terminal that lost its agent and sits at a shell, then reports in a toast.
-- `cmd-b` `layout.toggle:sidebar`, `cmd-p` picker, `cmd-shift-p` palette, `cmd-d` / `cmd-shift-d` split right / down, `cmd-]` / `cmd-[` `agent.next` / `agent.prev`, `cmd-alt-]` / `cmd-alt-[` next / previous space, `cmd-1`…`9` tabs, `ctrl-1`…`9` spaces, `cmd-shift-l` `layout.switch`.
-- In a terminal: `cmd-left/right` line start/end, `alt-left/right` word, `cmd-backspace` delete line, `cmd-z` undo, `ctrl-v` `terminal.paste_image`.
+- `mod.open:agent-switcher` opens the agent switcher, a 460px dialog of agents, most recent first. Bound to `ctrl-tab`, holding Ctrl and pressing Tab or Shift+Tab moves (`agent-switcher.next`, `agent-switcher.prev` in a `mod:agent-switcher` section). Releasing Ctrl runs `agent.focus`.
+- `mod.open:agent-resume` opens Agent resume. It types `claude --resume <id>` or `codex resume <id>` into each terminal that lost its agent and sits at a shell, then reports in a toast.
 
 ## Built from
 
@@ -173,7 +171,6 @@ Pane frame on `main`:
 - **Claude usage needs a status line.** The Claude row reads what `mods/my-usage/claude-statusline.sh` writes. Set it as Claude Code's `statusLine` command. It then runs the claude-hud plugin with `bun` from PATH, else `~/.bun/bin/bun`.
 - **Agent resume needs hooks.** `resume` acts on terminals labeled by `agent_resume.py hook <agent>`. Without the hooks it finds only Claude Code sessions it can adopt from `~/.claude/sessions`.
 - **Projects folder.** "Not open" scans `~/Repo`. A `projects` prop on the `spaces` block changes it.
-- **Not part of the layout.** `herdr-core/config.toml` sets `fish --login` as the shell for herdr-core. It is optional.
 
 ## Done when
 

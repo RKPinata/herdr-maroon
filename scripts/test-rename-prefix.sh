@@ -14,7 +14,7 @@ python3 -I - "$pkg" <<'PY'
 import json, sys
 pkg = sys.argv[1]
 p = f"{pkg}/keys.json"
-k = json.load(open(p))
+k = {"global": {"ctrl-tab": "mod.open:agent-switcher"}}
 k["global"].update({"f13": "mod.open:my-pane", "f14": "dummy-menu", "f15": "my-menu-extra"})
 k["mod:my-menu"] = {"enter": "my-menu.open"}
 json.dump(k, open(p, "w"), indent=2)

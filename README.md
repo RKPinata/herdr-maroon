@@ -11,7 +11,7 @@ Add the Herdr layout at https://github.com/RKPinata/herdr-maroon to my Herdr app
 Follow "Layouts and mods other people made" in ~/.config/herdr-app/AGENTS.md.
 Read README.md and RECIPE.md first, then:
 - Rename the repo's my-* mods with scripts/rename-prefix.sh if any name clashes with my mods.
-- Merge keys.json and settings.json into mine. Ask before you replace a key or setting I use.
+- Merge settings.json into mine. Ask before you replace a setting I use.
 - Tell me what each mod needs (programs, the Claude Code settings in README.md) and what I am missing.
 - Run herdr-app check on each mod, then switch to the maroon layout.
 ```
@@ -25,9 +25,7 @@ Read README.md and RECIPE.md first, then:
 | `layouts/maroon.json` | `~/.config/herdr-app/layouts/` | The window: sidebar, tab bar, panes, side panels |
 | `themes/maroon.json` | `~/.config/herdr-app/themes/` | Light theme, accent `#a01d2a` |
 | `mods/` | `~/.config/herdr-app/mods/` | 15 `my-*` mods, plus `linear`, `agent-switcher`, `agent-resume` |
-| `keys.json` | merge into `~/.config/herdr-app/keys.json` | Key bindings |
 | `settings.json` | merge into `~/.config/herdr-app/settings.json` | Fonts, zoom, theme per appearance |
-| `herdr-core/config.toml` | `~/.config/herdr-core/config.toml` | Terminals start `fish --login` |
 | `scripts/rename-prefix.sh` | stays here | Renames every `my-*` mod and all references to it |
 
 ## Install
@@ -43,7 +41,7 @@ Read README.md and RECIPE.md first, then:
    cp themes/maroon.json "$H/themes/"
    cp -R mods/* "$H/mods/"
    ```
-3. Merge `keys.json` and `settings.json` into yours by hand. Do not overwrite keys you already use.
+3. Merge `settings.json` into yours by hand.
 4. Check each mod:
    ```sh
    for m in mods/*; do herdr-app check "$H/mods/${m#mods/}"; done
@@ -55,7 +53,8 @@ An agent can do all of this. Point it at this folder and the section "Layouts an
 ## What it needs
 
 - **Fonts:** Monaspace Neon (terminal) and IBM Plex Mono (UI).
-- **Programs:** `git`, `gh` (signed in), `python3`, `jq`. `node` for Mermaid previews in `my-filer-pro`. `fish` for `herdr-core/config.toml`.
+- **Programs:** `git`, `gh` (signed in), `python3`, `jq`. `node` for Mermaid previews in `my-filer-pro`.
+- **Keys:** no bindings ship. Bind `mod.open:agent-switcher` (for example `ctrl-tab`) and `mod.open:agent-resume` in your `keys.json`. Inside the switcher, `agent-switcher.next` and `agent-switcher.prev` move.
 - **Projects folder:** `my-spaces` lists repos in `~/Repo`. Set the layout block's `projects` prop to use another folder.
 - **Linear:** the `linear` mod reads an API key from the macOS keychain, service `herdr-linear`. It is macOS only.
 - **Annotator helper:** `my-annotator` runs `~/.local/bin/herdr-annotator`. Install it from [jakub-tucek/herdr-annotator](https://github.com/jakub-tucek/herdr-annotator).
