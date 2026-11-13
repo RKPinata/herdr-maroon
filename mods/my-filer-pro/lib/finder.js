@@ -17,12 +17,12 @@ const RECENT_SHOWN = 10, RECENT_KEPT = 100, CACHE_MAX = 4, REMOTE_STALE_MS = 300
 export const FILES_SCRIPT = [
   'case "$3" in "~/"*) f="$HOME/${3#\\~/}";; *) f="$3";; esac',
   'cd "$1" 2>/dev/null || exit 2',
-  'mkdir -p "$(dirname "$f")" || exit 3',
+  '(umask 077; mkdir -p "$(dirname "$f")") || exit 3',
   '{ if command -v rg >/dev/null 2>&1; then',
   '  if [ "$2" = 1 ]; then rg --files --hidden -g "!.git" -g "!node_modules"; else rg --files -g "!node_modules"; fi',
   'elif git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git -c core.quotepath=off ls-files -z -co --exclude-standard | tr "\\0" "\\n"',
   'else find . -name .git -prune -o -name node_modules -prune -o -type f -print | sed "s|^\\./||"',
-  `fi; } | { if [ "$2" = 1 ]; then cat; else grep -v -E "(^|/)\\\\."; fi; } | head -c ${LIST_BYTES} > "$f.tmp" || exit 3`,
+  `fi; } | { if [ "$2" = 1 ]; then cat; else LC_ALL=C grep -v -E "(^|/)\\\\."; fi; } | head -c ${LIST_BYTES} > "$f.tmp" || exit 3`,
   'cut=0',
   `if [ "$(wc -c < "$f.tmp")" -ge ${LIST_BYTES} ]; then cut=1; sed '$d' "$f.tmp" > "$f.tmp2" && mv "$f.tmp2" "$f.tmp"; fi`,
   'mv "$f.tmp" "$f" || exit 3',
@@ -37,7 +37,7 @@ export const SEARCH_SCRIPT = [
   '[ -r "$f" ] || exit 4',
   'if command -v fzf >/dev/null 2>&1; then',
   '  if fzf --help 2>&1 | grep -q -- --scheme; then fzf --filter "$2" --scheme=path < "$f"; else fzf --filter "$2" < "$f"; fi | head -n "$3"',
-  'else grep -a -i -E -- "$4" "$f" | head -n "$3"; fi',
+  'else LC_ALL=C grep -a -i -E -- "$4" "$f" | head -n "$3"; fi',
 ].join("\n");
 
 // "name:12" or "name:12:5" -> { text: "name", line: 12, column: 5 }; anything else keeps its text.
@@ -108,12 +108,13 @@ export function createFinder({ exec, readTextFile, writeTextFile, recentPath, lo
 
   // The cache entry for a root: { state: "loading" | "ready" | "error", file, dots, count, truncated, error, ready: Promise }.
   // A stale, failed or (machine) 30 s old entry is listed again; a stale one keeps serving its old file meanwhile.
-  function files({ root, on = null, hide }) {
+  // force lists again even while a failed entry is inside its back-off.
+  function files({ root, on = null, hide }, { force = false } = {}) {
     const name = listName(on, root), key = name, dots = hide?.hide_dotfiles === true ? "0" : "1";
     let entry = cache.get(key);
-    const old = entry && (entry.stale || entry.dots !== dots || (entry.state === "error" && now() - entry.at > ERROR_RETRY_MS) || (on && now() - entry.at > REMOTE_STALE_MS));
+    const old = entry && (entry.stale || entry.dots !== dots || (entry.state === "error" && (force || now() - entry.at > ERROR_RETRY_MS)) || (on && now() - entry.at > REMOTE_STALE_MS));
     if (entry && (!old || entry.loading)) { cache.delete(key); cache.set(key, entry); return entry; }
-    entry = entry ?? { state: "loading", file: on ? `~/.cache/filer-pro/finder/${name}.txt` : `${localDir}/${name}.txt`, count: 0, truncated: false, error: null, at: 0, dots };
+    entry = entry ?? { state: "loading", file: on ? `~/.cache/filer-pro/finder/${name}.txt` : `${localDir}/${name}.txt`, count: 0, truncated: false, error: null, at: 0, dots, root, on };
     entry.stale = false;
     entry.dots = dots;
     entry.loading = true;
@@ -133,10 +134,13 @@ export function createFinder({ exec, readTextFile, writeTextFile, recentPath, lo
     return entry;
   }
 
-  // A watch batch under root: the next files() call lists again.
+  // A change under root on machine on: the next files() call lists again for every entry of that machine whose root
+  // is root, below it or above it.
   function invalidate({ root, on = null }) {
-    const entry = cache.get(listName(on, root));
-    if (entry) entry.stale = true;
+    const dir = (p) => p.replace(/\/+$/, "") + "/";
+    for (const entry of cache.values()) {
+      if ((entry.on ?? null) === (on ?? null) && (dir(entry.root).startsWith(dir(root)) || dir(root).startsWith(dir(entry.root)))) entry.stale = true;
+    }
   }
 
   // The ranked result for raw query text on a ready entry (rankPaths). Rejects when the filter cannot run.

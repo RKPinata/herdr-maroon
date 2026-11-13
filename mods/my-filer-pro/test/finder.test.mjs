@@ -104,8 +104,32 @@ assert.deepEqual(recentUnder(JSON.parse(file), null, "/r"), ["b.js", "a.js"]);
 assert.equal(finder.files({ root: "/missing", on: null, hide: hideNone }).loading, false);
 assert.equal(calls, 3); // the failed listing is not retried within 2 s
 t += 2001;
-finder.files({ root: "/missing", on: null, hide: hideNone });
+await finder.files({ root: "/missing", on: null, hide: hideNone }).ready;
 assert.equal(calls, 4);
+
+// force lists a failed root again inside the back-off.
+finder.files({ root: "/missing", on: null, hide: hideNone }, { force: true });
+assert.equal(calls, 5);
+
+// invalidate marks the entries of a machine whose root is the given one, below it or above it.
+{
+  const f = createFinder({
+    exec: async () => ({ code: 0, stdout: "1 1 0\n", stderr: "" }),
+    readTextFile: async () => null, writeTextFile: async () => {}, recentPath: "/x/r.json", localDir: "/x/finder", now: () => 0,
+  });
+  const entries = {};
+  for (const root of ["/r/src", "/other"]) { entries[root] = f.files({ root, hide: hideNone }); await entries[root].ready; }
+  f.invalidate({ root: "/r" });
+  assert.equal(entries["/r/src"].stale, true);
+  assert.equal(entries["/other"].stale, false);
+  entries["/r/src"].stale = false;
+  f.invalidate({ root: "/r/src/x" });
+  assert.equal(entries["/r/src"].stale, true);
+  assert.equal(entries["/other"].stale, false);
+  entries["/r/src"].stale = false;
+  f.invalidate({ root: "/r", on: "vps" });
+  assert.equal(entries["/r/src"].stale, false);
+}
 
 // A machine's list file is in ~/.cache; exec output decides truncated; the hide setting is part of an entry; search exit 4 lists again.
 {

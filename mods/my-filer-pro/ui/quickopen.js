@@ -25,7 +25,7 @@ function rowsOf(result) {
 
 // target: { root, on, hide } (root null: no folder); deps: { finder, onPick(item, open, at, cx) }, at: { line, column }.
 export function createQuickOpen(target, deps, cx) {
-  const state = { target, query: "", result: null, rows: [], at: 0, error: null, loading: Boolean(target.root), seq: 0, recent: [] };
+  const state = { target, query: "", wantOpen: null, pending: false, result: null, rows: [], at: 0, error: null, loading: Boolean(target.root), seq: 0, recent: [] };
   state.input = InputState.new({ placeholder: "Go to file…" });
   state.handle = cx.focus_handle();
   state.scroll = VirtualListScrollHandle.new();
@@ -35,10 +35,11 @@ export function createQuickOpen(target, deps, cx) {
   state.run = (cx) => {
     if (!state.entry) return;
     const seq = ++state.seq, text = state.query;
+    state.pending = true;
     cx.spawn(async (cx) => {
       try {
         if (target.on) { await cx.sleep(120); if (seq !== state.seq) return; }
-        if (state.entry.loading) await state.entry.ready;
+        if (state.entry.state !== "ready") await state.entry.ready;
         if (seq !== state.seq) return;
         if (state.entry.state === "error") throw new Error(state.entry.error);
         const result = await deps.finder.search(state.entry, text, { on: target.on, recent: state.recent, hide: target.hide });
@@ -52,14 +53,18 @@ export function createQuickOpen(target, deps, cx) {
         state.error = String(e?.message ?? e);
         state.rows = [];
       }
+      state.pending = false;
       state.loading = false;
+      const open = state.wantOpen;
+      state.wantOpen = null;
+      if (open !== null) { state.pick(state.at, open, cx); return; }
       state.scroll.scroll_to_item(0);
       cx.notify();
     });
   };
   // Lists the root again (after an error), then runs the query.
   state.retry = (cx) => {
-    state.entry = deps.finder.files(target);
+    state.entry = deps.finder.files(target, { force: true });
     state.error = null; state.loading = true;
     state.run(cx);
     cx.notify();
@@ -70,7 +75,11 @@ export function createQuickOpen(target, deps, cx) {
     if (r?.kind === "item") deps.onPick(r.item, open, { line: state.result?.line ?? null, column: state.result?.column ?? null }, cx);
   };
   state.input.on("change", (_e, cx) => { state.query = state.input.value(); state.run(cx); });
-  state.input.on("submit", (e, cx) => state.pick(state.at, !e.secondary, cx));
+  // A query in flight holds Enter until its reply lands, so the pick is never a row of the previous query.
+  state.input.on("submit", (e, cx) => {
+    if (state.pending) state.wantOpen = !e.secondary;
+    else state.pick(state.at, !e.secondary, cx);
+  });
   cx.spawn(async (cx) => {
     const { doc } = await deps.finder.readRecent();
     state.recent = target.root ? recentUnder(doc, target.on, target.root) : [];
@@ -106,6 +115,7 @@ function rowView(t, row, on, dark) {
 // handlers: { onClose() }
 export function quickOpenView(t, state, dark, rootLabel, handlers) {
   const { rows } = state;
+  const total = rows.reduce((s, r) => s + (r.kind === "head" ? HEAD : ROW), 0);
   const move = (delta, cx) => { state.at = stepRow(rows, state.at, delta); state.scroll.scroll_to_item(state.at); cx.notify(); };
   const message = state.error ?? (!state.target.root ? "No folder to search" : state.loading ? "Listing files…" : state.query.trim() ? "No matching files" : "Type to find a file");
   return v_flex().id("quick-open").track_focus(state.handle).size_full().p(12).gap(8).bg(t.popover).text_color(t.foreground).text_size(13)
@@ -127,7 +137,7 @@ export function quickOpenView(t, state, dark, rootLabel, handlers) {
       .child(svg(`${BASE}/search.svg`).size(14).text_color(t.foreground))
       .child(Input.new(state.input).flex_1().h_full().text_size(12.8).text_color(t.foreground)))
     .child(rows.length
-      ? v_flex().id("quick-open-box").relative().flex_1().min_h(0)
+      ? v_flex().id("quick-open-box").relative().flex_none().h(Math.min(420, total))
         .child(v_virtual_list("quick-open-list", rows.length, rows.map((r) => (r.kind === "head" ? HEAD : ROW)), (i) => rows[i].key,
           (range) => rows.slice(range.start, range.end).map((r, k) => rowView(t, r, range.start + k === state.at, dark)))
           .track_scroll(state.scroll).size_full()

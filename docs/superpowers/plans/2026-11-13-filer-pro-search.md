@@ -1809,7 +1809,7 @@ Replace with:
     // Files opens its go-to row with this folder (my-filer-pro pollGotoRow); mod commands carry no arguments, so the
     // folder goes through shared state and the command only puts the panel on screen.
     else if (it[1] === "files-goto") {
-      setShared("filer-pro.goto-row", { id: Math.random().toString(36).slice(2, 10), machine: it[2].machine, cwd: it[2].cwd });
+      setShared("filer-pro.goto-row", { id: Math.random().toString(36).slice(2, 10), machine: it[2].machine, cwd: it[2].cwd, at: Date.now() });
       run("my-filer-pro.show");
     }
     else run(it[1], it[2]);

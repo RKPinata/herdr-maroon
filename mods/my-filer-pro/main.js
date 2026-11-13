@@ -197,8 +197,11 @@ export default class FilerPro extends View {
     this.configSeen = shared("filer-pro.config")?.at ?? null;
     this.gotoSeen = shared("filer-pro.goto")?.id ?? null; // an old Show as Root request is not applied again
     this.packageSeen = shared("filer-pro.package")?.id ?? null; // an old Show Package Contents request is not applied again
-    this.pickSeen = shared("filer-pro.pick")?.id ?? null; // an old quick-open pick is not applied again
-    this.gotoRowSeen = shared("filer-pro.goto-row")?.id ?? null;
+    // A stored request older than 5 s is a leftover and is not applied again; a newer one came from a popup or menu
+    // that started before this copy, and the first render applies it.
+    const leftover = (r) => Date.now() - (r?.at ?? 0) > 5000;
+    this.pickSeen = leftover(shared("filer-pro.pick")) ? shared("filer-pro.pick")?.id ?? null : null;
+    this.gotoRowSeen = leftover(shared("filer-pro.goto-row")) ? shared("filer-pro.goto-row")?.id ?? null : null;
     this.treeScroll = ScrollHandle.new();
     this.treeFocus = cx.focus_handle();
     this.row = null; this.findQuery = ""; this.gotoError = null;
@@ -432,8 +435,10 @@ export default class FilerPro extends View {
   // open false: reveal only. at: { line, column } from a "name:12:5" query.
   pickFile(item, open, at) {
     const { root, on } = this.quick.target;
-    for (const [command, args] of showSteps(layout(), "filer-pro")) run(command, args);
-    setShared("filer-pro.pick", { id: this.newId(), machine: on ?? null, path: joinPath(root, item.path), open, line: at.line, column: at.column });
+    const steps = showSteps(layout(), "filer-pro");
+    if (!panelShown(layout(), "filer-pro") && !steps.length) { notify({ title: "Go to file", body: "This layout has no Files panel", level: "warning" }); return; }
+    for (const [command, args] of steps) run(command, args);
+    setShared("filer-pro.pick", { id: this.newId(), machine: on ?? null, path: joinPath(root, item.path), open, line: at.line, column: at.column, at: Date.now() });
     try { closeOverlay(props().overlay); } catch {}
   }
 
@@ -684,7 +689,7 @@ export default class FilerPro extends View {
   // Esc or closing the dialog without a choice counts as Cancel.
   // A dirty edit buffer is written to unsaved/ first (the app closes the dialog or panel without asking).
   async close() {
-    if (this.quick) { this.quick.scroll.release(); this.quick.input.release(); this.quick = null; return; }
+    if (this.quick) { this.quick.scroll.release(); this.quick.input.release(); this.quick.handle?.release?.(); this.quick = null; return; }
     const e = this.edit;
     if (e) {
       if (e.dirty) await this.keepUnsaved(e);
@@ -697,6 +702,7 @@ export default class FilerPro extends View {
       if (props().full) { this.fullState = "closed"; setShared("filer-pro.fullscreen", { id: props().full, state: "closed", at: Date.now(), saved: this.bigSaved?.path === this.file ? this.bigSaved : null }); }
       this.code?.release(); this.code = null; this.file = null; this.doc = null; this.loader = null; return;
     }
+    if (!props()?.view) { for (const h of [this.treeScroll, this.findInput, this.gotoInput]) h?.release?.(); return; }
     if (props()?.view !== "conflict") return;
     const a = closeAnswer(this.batchId, shared("filer-pro.pending"), shared("filer-pro.answer"));
     if (a) setShared("filer-pro.answer", a);
@@ -854,7 +860,7 @@ export default class FilerPro extends View {
       const saved = this.carried?.key === next ? this.carried : this.saved.get(next);
       this.carried = null;
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.realFolders = new Map(); this.fileReal = null; this.folders = new Set(saved?.folders); this.packages = new Set(saved?.packages);
-      this.pending = new Set(); this.marks = {}; this.show(null); this.watched = null; this.gitWatch = null; this.error = null; this.limited = false;
+      this.pending = new Set(); this.marks = {}; this.show(null); this.revealWanted = null; this.watched = null; this.gitWatch = null; this.error = null; this.limited = false;
       this.loading = false; this.again = false; this.fileWanted = 0; this.fileForce = false; this.lastOpened = saved?.lastOpened ?? null;
       if (saved?.file) this.show(saved.file, cx); // read fresh: no file reload needed
       file = 0; force = false;
@@ -992,7 +998,7 @@ export default class FilerPro extends View {
   openPicked(rel, r, cx) {
     this.revealInTree(rel, cx);
     this.lastOpened = rel;
-    if (r.open === false) { cx.notify(); return; }
+    if (r.open === false) { if (this.file) this.show(null); cx.notify(); return; }
     this.noteOpen(rel);
     if (this.editsInNvim(rel)) this.openInNvim(rel, cx, r.line ? `:${r.line}${r.column ? `:${r.column}` : ""}` : "");
     else this.show(rel, cx);
