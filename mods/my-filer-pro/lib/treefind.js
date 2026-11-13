@@ -1,0 +1,50 @@
+// The find row's matching, Reveal's folder chain and the go-to row's path. Pure.
+
+// The paths of rows (from visibleRows) whose name contains q, ignoring case, in row order. Note rows never match.
+export function findMatches(rows, q) {
+  const needle = q.trim().toLowerCase();
+  if (!needle) return [];
+  return rows.filter((r) => !r.entry.note && r.entry.name.toLowerCase().includes(needle)).map((r) => r.path);
+}
+
+// The match after (dir 1) or before (dir -1) current, wrapping; the first or last when current is not a match.
+// null without matches.
+export function stepMatch(matches, current, dir) {
+  if (!matches.length) return null;
+  const i = matches.indexOf(current);
+  if (i < 0) return dir < 0 ? matches[matches.length - 1] : matches[0];
+  return matches[(i + dir + matches.length) % matches.length];
+}
+
+// "1/3" for the counter: current's place among the matches, 0 when it is not one of them.
+export function matchCount(matches, current) {
+  return `${matches.indexOf(current) + 1}/${matches.length}`;
+}
+
+// The folders above a relative path, outermost first: "a/b/c.txt" -> ["a", "a/b"].
+export function ancestorsOf(rel) {
+  const parts = rel.split("/").filter(Boolean);
+  return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
+}
+
+// [start, end) of q in name ignoring case, or null: the find row's highlight.
+export function matchRange(name, q) {
+  const needle = q.trim().toLowerCase();
+  const i = needle ? name.toLowerCase().indexOf(needle) : -1;
+  return i < 0 ? null : [i, i + needle.length];
+}
+
+// The absolute folder a go-to entry names: "/abs", "~", "~/x" (home), or a path relative to root. "." and ".."
+// parts are resolved; a trailing slash is dropped. null for an empty entry.
+export function resolveGoto(text, root, home) {
+  const t = text.trim();
+  if (!t) return null;
+  const base = t === "~" || t.startsWith("~/") ? home + t.slice(1) : t.startsWith("/") ? t : `${root.replace(/\/+$/, "")}/${t}`;
+  const out = [];
+  for (const part of base.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") out.pop();
+    else out.push(part);
+  }
+  return "/" + out.join("/");
+}
