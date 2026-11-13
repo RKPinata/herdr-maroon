@@ -1,0 +1,9 @@
+{
+  "place": "none",
+  "size": 340,
+  "title": "Pull requests",
+  "cloned_from": {
+    "name": "pr-flow",
+    "version": "0.1.15"
+  }
+}

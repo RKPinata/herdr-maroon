@@ -1,0 +1,16 @@
+{
+  "zoom": 1.1,
+  "sounds": {
+    "enabled": true
+  },
+  "font": "Monaspace Neon",
+  "font_size": 14.5,
+  "font_ligatures": false,
+  "minimum_contrast": 1,
+  "appearance": "light",
+  "ui_font": "IBM Plex Mono",
+  "theme": {
+    "light": "maroon",
+    "dark": "graphite"
+  }
+}

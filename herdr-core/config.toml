@@ -1,0 +1,4 @@
+# herdr-core settings. Copy to ~/.config/herdr-core/config.toml.
+
+# New terminals, and terminals recovered after a core restart, start fish.
+shell = ["fish", "--login"]
