@@ -60,19 +60,19 @@ The finder lives in module scope. Herdr shares module code between every copy of
 
 ### Listing
 
-`FILES_SCRIPT` runs once per root through `exec("sh", …, { on, timeout: 15000 })`, on the machine of the root. It writes one relative path per line to a list file and prints the line and byte counts. It uses the first tool that exists:
+`FILES_SCRIPT` runs once per root through `exec("sh", …, { on, timeout: 15000 })`, on the machine of the root. It writes one relative path per line to a list file and prints the line count, the byte count and `1` when the list was cut, else `0`. It uses the first tool that exists:
 
 1. `rg --files --hidden -g '!.git' -g '!node_modules'` (without `--hidden` when `hide_dotfiles` is on)
-2. `git ls-files -co --exclude-standard`, inside a repository
+2. `git -c core.quotepath=off ls-files -z -co --exclude-standard`, inside a repository
 3. `find . -name .git -prune -o -name node_modules -prune -o -type f -print`
 
-With `hide_dotfiles` on, paths with a dot part are dropped. The list stops at 7 MiB (`head -c`); then `truncated` is set. List files live in `~/.config/herdr-app/data/filer-pro/finder/` on this computer and in `/tmp` on a machine.
+With `hide_dotfiles` on, paths with a dot part are dropped. The list stops at 7 MiB (`head -c`); the partial last line is dropped and `truncated` is set. List files live in `~/.config/herdr-app/data/filer-pro/finder/` on this computer and in `~/.cache/filer-pro/finder/` on a machine (a leading `~/` in the file argument is that machine's `$HOME`).
 
-An LRU keeps 4 entries. A local entry goes stale on a watch batch under the root or on Refresh; a machine's entry also after 30 s. A stale entry keeps its old list file while the new one is written. Windows has no listing: `sh` is required.
+An LRU keeps 4 entries. A local entry goes stale on a watch batch under the root or on Refresh; a machine's entry also after 30 s. An entry also records the `hide_dotfiles` value it was listed with, and a call with the other value lists again. A failed entry is listed again after 2 s. A stale entry keeps its old list file while the new one is written. Windows has no listing: `sh` is required.
 
 ### Ranking
 
-Each query runs `SEARCH_SCRIPT` on the list file: `fzf --filter <query> --scheme=path | head -n 200`, or `grep -i -E <pattern> | head -n 200` where `fzf` is missing. The fzf query has fzf's operators stripped. The grep pattern is the longest word's characters with `.*` between them.
+Each query runs `SEARCH_SCRIPT` on the list file: `fzf --filter <query> --scheme=path | head -n 200` (without `--scheme` where fzf does not know it), or `grep -a -i -E <pattern> | head -n 200` where `fzf` is missing. The fzf query has fzf's operators, `*` and `…` stripped. A missing list file exits 4; `search` then marks the entry stale and rejects with "The file list is gone; list again". The grep pattern is the longest word's characters with `.*` between them.
 
 The hits are ranked with `lib/fuzzy.js`, a port of VS Code's `fuzzyScorer.ts` (MIT, commit `f6c56f75d0f9ff0774c14303046f43acfde240f3`). `THIRD_PARTY_NOTICES.md` carries its license.
 

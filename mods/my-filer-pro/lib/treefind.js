@@ -39,6 +39,7 @@ export function matchRange(name, q) {
 export function resolveGoto(text, root, home) {
   const t = text.trim();
   if (!t) return null;
+  if (!home && (t === "~" || t.startsWith("~/"))) return null;
   const base = t === "~" || t.startsWith("~/") ? home + t.slice(1) : t.startsWith("/") ? t : `${root.replace(/\/+$/, "")}/${t}`;
   const out = [];
   for (const part of base.split("/")) {

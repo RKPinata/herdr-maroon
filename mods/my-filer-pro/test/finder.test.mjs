@@ -13,6 +13,7 @@ assert.deepEqual(parseQuery("a:b"), { text: "a:b", line: null, column: null });
 
 // Queries for the native filter.
 assert.equal(fzfQuery(" 'foo  ^bar$ "), "foo bar");
+assert.equal(fzfQuery("ma*in…"), "main");
 assert.equal(grepPattern("ab c.d"), "c.*\\..*d"); // the longest word
 assert.equal(grepPattern("lib finder"), "f.*i.*n.*d.*e.*r");
 assert.equal(grepPattern("a.b"), "a.*\\..*b");
@@ -54,6 +55,21 @@ sh(FILES_SCRIPT, dir, "0", out);
 assert.deepEqual(readFileSync(out, "utf8").trim().split("\n").sort(), ["src/main.js", "src/msg/index.vue"]);
 assert.deepEqual(sh(SEARCH_SCRIPT, out, "msgidx", "200", grepPattern("msgidx")).trim().split("\n"), ["src/msg/index.vue"]);
 
+// SEARCH_SCRIPT: a missing list file exits 4; a leading ~/ is the home folder.
+assert.throws(() => sh(SEARCH_SCRIPT, join(dir, "nope.txt"), "a", "5", "a"), (e) => e.status === 4);
+const home = mkdtempSync(join(tmpdir(), "finder-home-"));
+mkdirSync(join(home, ".cache"), { recursive: true });
+writeFileSync(join(home, ".cache/l.txt"), "src/main.js\n");
+const inHome = (script, ...args) => execFileSync("sh", ["-c", script, "x", ...args], { env: { ...process.env, HOME: home } }).toString();
+assert.equal(inHome(SEARCH_SCRIPT, "~/.cache/l.txt", "main", "5", "main").trim(), "src/main.js");
+inHome(FILES_SCRIPT, dir, "0", "~/.cache/sub/l2.txt");
+assert.deepEqual(readFileSync(join(home, ".cache/sub/l2.txt"), "utf8").trim().split("\n").sort(), ["src/main.js", "src/msg/index.vue"]);
+// A file name with odd characters is listed as it is.
+const odd = mkdtempSync(join(tmpdir(), "finder-odd-"));
+writeFileSync(join(odd, "café.js"), "");
+sh(FILES_SCRIPT, odd, "1", join(odd, "../odd-list.txt"));
+assert.equal(readFileSync(join(odd, "../odd-list.txt"), "utf8").trim(), "café.js");
+
 // createFinder: one listing per root, stale after invalidate, errors kept, recent written.
 let calls = 0, t = 0, file = null;
 const finder = createFinder({
@@ -84,6 +100,42 @@ assert.equal(bad.error, "Cannot open /missing");
 await finder.recordOpen({ on: null, path: "/r/a.js" });
 await finder.recordOpen({ on: null, path: "/r/b.js" });
 assert.deepEqual(recentUnder(JSON.parse(file), null, "/r"), ["b.js", "a.js"]);
+
+assert.equal(finder.files({ root: "/missing", on: null, hide: hideNone }).loading, false);
+assert.equal(calls, 3); // the failed listing is not retried within 2 s
+t += 2001;
+finder.files({ root: "/missing", on: null, hide: hideNone });
+assert.equal(calls, 4);
+
+// A machine's list file is in ~/.cache; exec output decides truncated; the hide setting is part of an entry; search exit 4 lists again.
+{
+  let n = 0, out = "5 100 0\n", searchCode = 0, clock = 0;
+  const f = createFinder({
+    exec: async (_c, args) => (args[2] === "search" ? { code: searchCode, stdout: "", stderr: "" } : (n++, { code: 0, stdout: out, stderr: "" })),
+    readTextFile: async () => null, writeTextFile: async () => {}, recentPath: "/x/r.json", localDir: "/x/finder", now: () => clock,
+  });
+  const remote = f.files({ root: "/r", on: "vps", hide: hideNone });
+  await remote.ready;
+  assert.equal(remote.file, `~/.cache/filer-pro/finder/${listName("vps", "/r")}.txt`);
+  assert.equal(remote.truncated, false);
+  out = "5 7340032 1\n";
+  f.invalidate({ root: "/r" });
+  const cut = f.files({ root: "/r", hide: hideNone });
+  await cut.ready;
+  assert.equal(cut.truncated, true);
+  assert.equal(n, 2);
+  f.files({ root: "/r", hide: { hide_dotfiles: true } });
+  assert.equal(n, 3);
+  await f.files({ root: "/r", hide: { hide_dotfiles: true } }).ready;
+  f.files({ root: "/r", hide: { hide_dotfiles: false } });
+  assert.equal(n, 4);
+  const e = f.files({ root: "/r", hide: { hide_dotfiles: false } });
+  await e.ready;
+  searchCode = 4;
+  await assert.rejects(f.search(e, "abc", { hide: hideNone }), { message: "The file list is gone; list again" });
+  f.files({ root: "/r", hide: { hide_dotfiles: false } });
+  assert.equal(n, 5);
+}
 
 console.log("finder ok");
 

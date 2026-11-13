@@ -27,6 +27,8 @@ assert.equal(matchRange("a.vue", "x"), null);
 assert.equal(resolveGoto("/abs/x/", "/r", "/h"), "/abs/x");
 assert.equal(resolveGoto("~", "/r", "/h"), "/h");
 assert.equal(resolveGoto("~/Repo", "/r", "/h"), "/h/Repo");
+assert.equal(resolveGoto("~", "/r", ""), null);
+assert.equal(resolveGoto("~/x", "/r", undefined), null);
 assert.equal(resolveGoto("../x", "/r/a", "/h"), "/r/x");
 assert.equal(resolveGoto("sub/./y", "/r/", "/h"), "/r/sub/y");
 assert.equal(resolveGoto("/..", "/r", "/h"), "/");

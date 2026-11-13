@@ -9,4 +9,6 @@ assert.deepEqual(showSteps(stack(false, "files"), "filer-pro"), [["layout.select
 const column = { id: "root", children: [{ id: "panel", hidden: false, children: [{ id: "panel-body", type: "column", children: [{ id: "files" }, { id: "filer-pro", hidden: true }] }] }] };
 assert.deepEqual(showSteps(column, "filer-pro"), [["layout.show", { id: "files" }], ["layout.show", { id: "filer-pro" }], ["layout.show", { id: "panel" }]]);
 assert.deepEqual(showSteps({ id: "root" }, "filer-pro"), []);
+assert.deepEqual(showSteps(stack(false, "files"), "nope"), []);
+assert.deepEqual(showSteps(column, "nope"), []);
 console.log("panels ok");
