@@ -23,7 +23,8 @@ function rowsOf(result) {
   return rows;
 }
 
-// target: { root, on, hide } (root null: no folder); deps: { finder, onPick(item, open, at, cx) }, at: { line, column }.
+// target: { root, on, hide, editor } (root null: no folder; editor: the GUI editor's name); deps: { finder, onPick(item, mode, at, cx) },
+// mode: { open, editor }, at: { line, column }.
 export function createQuickOpen(target, deps, cx) {
   const state = { target, query: "", wantOpen: null, pending: false, result: null, rows: [], at: 0, error: null, loading: Boolean(target.root), seq: 0, recent: [], closed: false };
   state.input = InputState.new({ placeholder: "Go to file…" });
@@ -55,9 +56,9 @@ export function createQuickOpen(target, deps, cx) {
       }
       state.pending = false;
       state.loading = false;
-      const open = state.wantOpen;
+      const mode = state.wantOpen;
       state.wantOpen = null;
-      if (open !== null && state.pick(state.at, open, cx)) return;
+      if (mode !== null && state.pick(state.at, mode, cx)) return;
       state.scroll.scroll_to_item(0);
       cx.notify();
     });
@@ -69,16 +70,18 @@ export function createQuickOpen(target, deps, cx) {
     state.run(cx);
     cx.notify();
   };
-  // open false: reveal in the tree only (cmd-enter). true: the pick was handed off and the popup closes.
-  state.pick = (i, open, cx) => {
+  // mode.open false: reveal in the tree only (cmd-enter). mode.editor: also open in the code editor (shift-enter).
+  // true: the pick was handed off and the popup closes.
+  state.pick = (i, mode, cx) => {
     const r = state.rows[i];
-    return r?.kind === "item" && deps.onPick(r.item, open, { line: state.result?.line ?? null, column: state.result?.column ?? null }, cx) === true;
+    return r?.kind === "item" && deps.onPick(r.item, mode, { line: state.result?.line ?? null, column: state.result?.column ?? null }, cx) === true;
   };
   state.input.on("change", (_e, cx) => { state.query = state.input.value(); state.wantOpen = null; state.run(cx); });
   // A query in flight holds Enter until its reply lands, so the pick is never a row of the previous query.
   state.input.on("submit", (e, cx) => {
-    if (state.pending) state.wantOpen = !e.secondary;
-    else state.pick(state.at, !e.secondary, cx);
+    const mode = { open: !e.secondary, editor: Boolean(e.shift) };
+    if (state.pending) state.wantOpen = mode;
+    else state.pick(state.at, mode, cx);
   });
   cx.spawn(async (cx) => {
     const { doc } = await deps.finder.readRecent();
@@ -112,6 +115,13 @@ function rowView(t, row, on, dark) {
     .child(highlighted(t, item.dir, item.dirHits, 11.5).flex_1().min_w(0).overflow_hidden());
 }
 
+// The keys under the list: semibold key, then its action.
+function hints(t, editor) {
+  const pairs = [["⏎", "Open"], ["⌘⏎", "Reveal in Files"], ["⇧⏎", `Open in ${editor}`], ["Esc", "Close"]];
+  return h_flex().flex_none().gap(14).text_size(11).text_color(t.foreground)
+    .children(pairs.map(([key, action]) => h_flex().gap(4).child(div().font_semibold().child(key)).child(div().child(action))));
+}
+
 // handlers: { onClose() }
 export function quickOpenView(t, state, dark, rootLabel, handlers) {
   const { rows } = state;
@@ -141,10 +151,11 @@ export function quickOpenView(t, state, dark, rootLabel, handlers) {
         .child(v_virtual_list("quick-open-list", rows.length, rows.map((r) => (r.kind === "head" ? HEAD : ROW)), (i) => rows[i].key,
           (range) => rows.slice(range.start, range.end).map((r, k) => rowView(t, r, range.start + k === state.at, dark)))
           .track_scroll(state.scroll).size_full()
-          .on_item_click((key, cx) => { const i = rows.findIndex((r) => r.key === key); if (i >= 0) state.pick(i, true, cx); }))
+          .on_item_click((key, cx) => { const i = rows.findIndex((r) => r.key === key); if (i >= 0) state.pick(i, { open: true, editor: false }, cx); }))
         .child(Scrollbar.vertical("quick-open-list").absolute().inset_0())
       : h_flex().flex_1().px(8).gap(8).items_start()
         .child(div().text_size(12).text_color(state.error ? t.ansi1 : t.foreground).child(message))
         .when(Boolean(state.error), (el) => el.child(boxy(t, "quick-open-retry", "Retry", { h: 20, px: 8, size: 11.5, onClick: (_e, cx) => state.retry(cx) }))))
+    .when(Boolean(state.target.root), (el) => el.child(hints(t, state.target.editor ?? "VS Code")))
     .when(Boolean(state.entry?.truncated), (el) => el.child(div().flex_none().text_size(11).child(`Listed the first ${state.entry.count} files`)));
 }

@@ -99,7 +99,7 @@ An empty query shows the recent files under the root. A typed query ranks the re
 - The ⌕ button in the Files header runs `mod.open` with the same name.
 - A popup copy has `props().overlay` and no `props().view`.
 - While Files is hidden, the popup searches the terminal's folder; a pick outside the root the panel shows gives the toast "Outside <root>".
-- The panel publishes its shown root as `shared("filer-pro.root") = { root, on, hide }` whenever its context changes. The popup searches that root while the Files panel is on screen, else the focused terminal's folder.
+- The panel publishes its shown root as `shared("filer-pro.root") = { root, on, hide, editor }` (`editor`: the name of the GUI code editor) whenever its context changes. The popup searches that root while the Files panel is on screen, else the focused terminal's folder.
 - Focus: `input.focus()`, then once more after 600 ms, as the `picker` mod does.
 
 ### Layout
@@ -111,12 +111,14 @@ An empty query shows the recent files under the root. A typed query ranks the re
 │ ▌📄 vue-legacy-patterns.md   app/.claude/rules               │
 │ file results                                                 │
 │  V index.vue                 src/app/modules/messages        │
+│ ⏎ Open  ⌘⏎ Reveal in Files  ⇧⏎ Open in VS Code  Esc Close    │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 - `v_virtual_list` with 30 px rows and 24 px group headers, `track_scroll` and a vertical `Scrollbar`.
 - Icons from `lib/icons.js`. Matched characters in `t.accent`, semibold. The folder path in `t.foreground` at 11.5 px.
 - The selected row is drawn with `card()` from `boxy.js`.
+- A key hint footer under the list, shown whenever a folder is set: `⏎ Open   ⌘⏎ Reveal in Files   ⇧⏎ Open in <editor name>   Esc Close`, 11 px in `t.foreground`, keys semibold. The editor name comes from `quickTarget()` (default "VS Code").
 - States: "Listing files…"; the error in `t.ansi1` with a Retry button; "No matching files"; "Type to find a file"; "Listed the first N files" when the list was cut.
 - On a machine, a query waits 120 ms for more typing before it runs.
 
@@ -128,6 +130,7 @@ An empty query shows the recent files under the root. A typed query ranks the re
 | PageUp, PageDown | Move 10 rows |
 | ⏎, click | Reveal and open |
 | ⌘⏎ | Reveal only |
+| ⇧⏎ | Reveal in the tree and open in the GUI code editor (`openInEditor`); a failure shows "Open in <editor> failed" |
 | Esc, click outside | Close |
 
 ### Handoff
