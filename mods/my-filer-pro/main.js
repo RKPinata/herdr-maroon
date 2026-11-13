@@ -1,6 +1,6 @@
 // A lazy file browser for the focused pane's folder, with bounded read-only previews.
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
+import { v_flex, h_flex, Editor, EditorState, ScrollHandle, InputState } from "gpui-base";
 import { spaces, panes, focused, exec, hc, readTextFile, writeTextFile, watchFolder, theme, settings, window, shared, setShared, notify, props, appHome, home, nextCommand, openOverlay, closeOverlay, pickFolder, run, layout } from "herdr";
 import * as fs from "fs/promises";
 import { createJobs } from "./lib/jobs.js";
@@ -19,7 +19,7 @@ import { fileClick, folderClick } from "./lib/clicks.js";
 import { isBinaryName, nulReason, BINARY_MESSAGE } from "./lib/binary.js";
 import { readFileGuarded } from "./lib/readfile.js";
 import { icon, BASE } from "./lib/icons.js";
-import { withPanel, withoutLegacy, panelShown } from "./lib/panels.js";
+import { withPanel, withoutLegacy, panelShown, showSteps } from "./lib/panels.js";
 import { dropRequest, dropTarget } from "./lib/droptarget.js";
 import { createFileOps, successToast, validateName } from "./lib/fileops.js";
 import { createMoveOps, moveToasts } from "./lib/move.js";
@@ -48,11 +48,19 @@ import { conflictView } from "./ui/conflict.js";
 import { editTools, promptBar, statusBar } from "./ui/edit.js";
 import { createSettingsDialog, settingsView, submitSettings, tilde } from "./ui/settings.js";
 import { boxy } from "./boxy.js";
+import { createFinder } from "./lib/finder.js";
+import { findMatches, stepMatch, matchCount, ancestorsOf, matchRange, resolveGoto } from "./lib/treefind.js";
+import { createQuickOpen, quickOpenView } from "./ui/quickopen.js";
+import { findRow, gotoRow } from "./ui/treerow.js";
 
 // The preview lives in ./preview/ and is only ever loaded here, with import(): a deleted or broken folder
 // gives null and files open as plain source. A failure is not remembered, so putting the folder back works at the next click.
 let previewModule = null;
 const loadPreview = async () => (previewModule ??= await import("./preview/index.js").catch(() => null));
+
+// Quick open's lists, shared by every copy of this build; made on first use, so loading the module runs no host call.
+let finderInstance = null;
+const finder = () => (finderInstance ??= createFinder({ exec, readTextFile, writeTextFile, recentPath: `${appHome()}/filer-pro/recent.json`, localDir: `${appHome()}/data/filer-pro/finder`, now: Date.now }));
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -68,6 +76,15 @@ function location() {
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
   return { cwd: pane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
+}
+
+// The folder quick open searches: the Files panel's shown root while the panel is on screen, else the focused
+// terminal's folder. hide: the panel's hide settings as it published them.
+function quickTarget() {
+  const shown = shared("filer-pro.root");
+  if (shown?.root && panelShown(layout(), "filer-pro")) return { root: shown.root, on: shown.on ?? null, hide: shown.hide ?? null };
+  const loc = location();
+  return { root: loc.cwd ?? null, on: loc.on ?? null, hide: shown?.hide ?? null };
 }
 // The settings before the config file was read (and in copies that never read it): today's defaults.
 const DEFAULTS = { ...numbers(null), node_path: "", svg_check: true, hide_system_files: true, hide_dotfiles: false, double_click_files: false, double_click_apps: true, double_click_folders: true, show_sizes: true };
@@ -133,6 +150,8 @@ export default class FilerPro extends View {
         // Every InputState of the dialog is created here, from the snapshot the opener stored (openSettings).
         this.settings = createSettingsDialog(shared("filer-pro.settings"), cx);
       }
+      // mod.open:my-filer-pro (cmd-k, the header's search button): quick open, placed by mod.json's overlay.
+      if (!props().view) this.quick = createQuickOpen(quickTarget(), { finder: finder(), onPick: (item, open, at) => this.pickFile(item, open, at) }, cx);
       if (props().view === "file") {
         // The fullscreen copy of one file: reads it itself with the panel's show(), under a fixed context.
         this.context = { key: null, cwd: props().root, on: props().machine ?? null, fixed: true };
@@ -157,6 +176,8 @@ export default class FilerPro extends View {
           try { command = await nextCommand(); } catch { await cx.sleep(1000); continue; }
           if (!live(cx)) return;
           if (command === "reveal" && !panelShown(layout(), "filer-pro")) this.revealLast();
+          // my-menu's Go to Folder in Files: the panel may be hidden, so this always-shown copy puts it on screen.
+          if (command === "show") for (const [c, a] of showSteps(layout(), "filer-pro")) run(c, a);
         }
       });
       return;
@@ -176,6 +197,17 @@ export default class FilerPro extends View {
     this.configSeen = shared("filer-pro.config")?.at ?? null;
     this.gotoSeen = shared("filer-pro.goto")?.id ?? null; // an old Show as Root request is not applied again
     this.packageSeen = shared("filer-pro.package")?.id ?? null; // an old Show Package Contents request is not applied again
+    this.pickSeen = shared("filer-pro.pick")?.id ?? null; // an old quick-open pick is not applied again
+    this.gotoRowSeen = shared("filer-pro.goto-row")?.id ?? null;
+    this.treeScroll = ScrollHandle.new();
+    this.treeFocus = cx.focus_handle();
+    this.row = null; this.findQuery = ""; this.gotoError = null;
+    this.findInput = InputState.new({ placeholder: "Find in tree" });
+    this.findInput.on("change", (_e, cx) => { this.findQuery = this.findInput.value(); this.findStep(0, cx); });
+    this.findInput.on("submit", (e, cx) => this.findStep(e.shift ? -1 : 1, cx));
+    this.gotoInput = InputState.new({ placeholder: "/path, ~/path or a path below this folder" });
+    this.gotoInput.on("change", (_e, cx) => { if (this.gotoError) { this.gotoError = null; cx.notify(); } });
+    this.gotoInput.on("submit", (_e, cx) => this.submitGoto(cx));
     cx.spawn(async (cx) => {
       const cfg = this.cfg = await loadConfig(readTextFile, appHome, home);
       // The first listing ran with the defaults: other list settings reload the tree once more (no timer to wait for).
@@ -396,6 +428,15 @@ export default class FilerPro extends View {
         .child(svg(`${BASE}/folder.svg`).size(14).flex_none()).child("Filer Pro"));
   }
 
+  // Quick open's pick: puts the Files panel on screen and hands it the file (pollPick), then closes the popup.
+  // open false: reveal only. at: { line, column } from a "name:12:5" query.
+  pickFile(item, open, at) {
+    const { root, on } = this.quick.target;
+    for (const [command, args] of showSteps(layout(), "filer-pro")) run(command, args);
+    setShared("filer-pro.pick", { id: this.newId(), machine: on ?? null, path: joinPath(root, item.path), open, line: at.line, column: at.column });
+    try { closeOverlay(props().overlay); } catch {}
+  }
+
   // Shows the last download in the Finder (toast action "filer-pro.reveal").
   revealLast() {
     const last = shared("filer-pro.last_download");
@@ -440,6 +481,10 @@ export default class FilerPro extends View {
   overlayView(cx) {
     const t = theme(), p = props();
     const close = () => { try { closeOverlay(p.overlay); } catch {} };
+    if (!p.view && this.quick) {
+      const { root, on } = this.quick.target;
+      return quickOpenView(t, this.quick, Boolean(settings().dark), root ? `${on ? `${on}: ` : ""}${tilde(root, home())}` : "", { onClose: close });
+    }
     if (p.view === "menu") {
       const send = (fields) => {
         this.request(p.machine ? { machine: p.machine, path: p.path, ...fields } : { action: "copy", paths: [p.path], ...(fields.dest_dir ? { folder: fields.dest_dir } : {}) });
@@ -639,6 +684,7 @@ export default class FilerPro extends View {
   // Esc or closing the dialog without a choice counts as Cancel.
   // A dirty edit buffer is written to unsaved/ first (the app closes the dialog or panel without asking).
   async close() {
+    if (this.quick) { this.quick.scroll.release(); this.quick.input.release(); this.quick = null; return; }
     const e = this.edit;
     if (e) {
       if (e.dirty) await this.keepUnsaved(e);
@@ -674,6 +720,7 @@ export default class FilerPro extends View {
         const resolved = this.realRoot(root).then((r) => { real = r; });
         while (this.context === context) {
           const paths = await watchFolder(root);
+          finder().invalidate({ root, on: null }); // any change below the root may add or remove a file quick open lists
           await resolved;
           if (!this.current(context)) continue;
           let plan = watchPlan(paths, this.watchOpts(root, real));
@@ -812,6 +859,13 @@ export default class FilerPro extends View {
       if (saved?.file) this.show(saved.file, cx); // read fresh: no file reload needed
       file = 0; force = false;
     }
+    // What quick open searches while this panel is on screen (quickTarget); written only when it changed, since
+    // every write redraws every mod. A config reload passes here too, so new hide settings reach it.
+    if (!props()?.overlay) {
+      const value = { root: cwd ?? null, on: on ?? null, hide: { hide_system_files: this.conf.hide_system_files, hide_dotfiles: this.conf.hide_dotfiles } };
+      const json = JSON.stringify(value);
+      if (json !== this.publishedRoot) { this.publishedRoot = json; cx.spawn(async () => setShared("filer-pro.root", value)); }
+    }
     this.fileWanted = Math.max(this.fileWanted ?? 0, file === true ? FILE_ALL : file || 0);
     if (force) this.fileForce = true;
     if (!cwd) return;
@@ -921,6 +975,57 @@ export default class FilerPro extends View {
     if (!r?.id || r.id === this.gotoSeen) return;
     this.gotoSeen = r.id;
     if (expandPath({ machine: r.machine ?? null, folder: r.path }, this.root, this.on)) cx.spawn(async (cx) => this.navigate(r.path, cx));
+  }
+
+  // Quick open's pick (shared filer-pro.pick = { id, machine, path, open, line, column }): the panel that shows that
+  // machine and a folder above the path reveals the file and opens it, once. Called from render, so it runs in a task.
+  pollPick(cx) {
+    const r = shared("filer-pro.pick");
+    if (!r?.id || r.id === this.pickSeen) return;
+    this.pickSeen = r.id;
+    const rel = expandPath({ machine: r.machine ?? null, folder: r.path }, this.root, this.on);
+    if (!rel) { cx.spawn(async () => notify({ title: "Go to file", body: `Outside ${this.root ?? "the shown folder"}`, level: "warning" })); return; }
+    cx.spawn(async (cx) => this.requestLeave((cx) => this.openPicked(rel, r, cx), cx));
+  }
+
+  // Reveals rel and, unless r.open is false, opens it: local text and Markdown in the tab's nvim at r.line, the rest in the viewer.
+  openPicked(rel, r, cx) {
+    this.revealInTree(rel, cx);
+    this.lastOpened = rel;
+    if (r.open === false) { cx.notify(); return; }
+    this.noteOpen(rel);
+    if (this.editsInNvim(rel)) this.openInNvim(rel, cx, r.line ? `:${r.line}${r.column ? `:${r.column}` : ""}` : "");
+    else this.show(rel, cx);
+  }
+
+  // Expands every folder above rel and loads the ones not loaded yet; render scrolls to it afterwards (revealPending).
+  // shortcut: a folder above rel that is a macOS package stays a file row, so the reveal stops there; add it to this.packages when that matters.
+  revealInTree(rel, cx) {
+    const above = ancestorsOf(rel);
+    for (const folder of above) this.folders.add(folder);
+    this.revealWanted = rel;
+    if (above.some((folder) => !this.entries.has(folder))) this.refresh(cx);
+    cx.notify();
+  }
+
+  // Scrolls the tree so path's row is visible; false when the row is not in the tree.
+  scrollToRow(path) {
+    const i = this.visible().findIndex((r) => r.path === path);
+    if (i >= 0) this.treeScroll.scroll_to_item(i);
+    return i >= 0;
+  }
+
+  // The scroll of a reveal, once the tree is loaded and on screen (not behind the viewer). Called from render.
+  revealPending(cx) {
+    const want = this.revealWanted;
+    if (!want || this.file || this.loading || this.pending.size) return;
+    this.revealWanted = null;
+    if (!this.scrollToRow(want)) cx.spawn(async () => notify({ title: "Go to file", body: "Beyond the list limit, not shown in the tree", level: "info" }));
+  }
+
+  // An opened file for quick open's recently opened group.
+  noteOpen(path) {
+    finder().recordOpen({ on: this.on, path: joinPath(this.root, path) }).catch(() => {});
   }
 
   // Calculate Size (issue #58): the menu copy asks through shared filer-pro.sizes (lib/sizes.js requestSize). The panel
@@ -1941,6 +2046,7 @@ export default class FilerPro extends View {
         // Calculated folder sizes are a snapshot (lib/sizes.js): Refresh drops those of the shown folder and below.
         const sizes = shared("filer-pro.sizes"), next = dropSizes(sizes, this.on, this.root, Date.now());
         if (next !== sizes) setShared("filer-pro.sizes", next);
+        finder().invalidate({ root: this.root, on: this.on });
         this.reloadConfig(cx, { file: FILE_NAMED, force: true });
       } })
       .tooltip("Refresh").accessibility_label("Refresh");
@@ -1984,6 +2090,7 @@ export default class FilerPro extends View {
       return;
     }
     const action = fileClick(event, bundle ? this.conf.double_click_apps : this.conf.double_click_files);
+    if (action === "open" && !bundle) this.noteOpen(path);
     if (action === "open" && !bundle && this.editsInNvim(path)) { this.openInNvim(path, cx); return; }
     if (action === "open" && !bundle) { this.show(path, cx); return; }
     if (!action) return;
@@ -1998,11 +2105,12 @@ export default class FilerPro extends View {
   }
 
   // Opens a file in the tab's nvim. Without my-nvim installed the viewer shows it instead.
-  openInNvim(path, cx) {
+  // at: ":line" or ":line:column" (my-nvim open accepts <file>:line[:col]), or "".
+  openInNvim(path, cx, at = "") {
     this.lastOpened = path; cx.notify();
     const tab = focused()?.tab;
     cx.spawn(async (cx) => {
-      const r = tab ? await exec(`${appHome()}/mods/my-nvim/bin/my-nvim`, ["open", "--tab", tab, joinPath(this.root, path)]).catch(() => null) : null;
+      const r = tab ? await exec(`${appHome()}/mods/my-nvim/bin/my-nvim`, ["open", "--tab", tab, joinPath(this.root, path) + at]).catch(() => null) : null;
       if (r?.code === 0) return;
       if (r) notify({ title: "Open in nvim", body: (r.stderr || r.stdout).trim().slice(-400), level: "error" });
       this.show(path, cx);
@@ -2104,6 +2212,8 @@ export default class FilerPro extends View {
     this.pollReload(cx);
     this.pollPackage(cx);
     this.pollGoto(cx);
+    this.pollPick(cx);
+    this.revealPending(cx);
     const t = theme(), dark = Boolean(settings().dark);
     if (this.doc?.diagrams && this.previewer && this.colorKey !== this.previewer.colorKey(t)) this.renderDiagrams(cx);
     // update_check false hides the hint at once; the stored result is cleared by the next hourly pass.
@@ -2124,7 +2234,7 @@ export default class FilerPro extends View {
         .when(Boolean(this.file) && !this.full, el => el.child(boxy(t, "files-full", svg(`${BASE}/maximize.svg`).size(13), { h: 20, px: 5, onClick: (_e, cx) => this.openFull(cx) }))))
       // The tree stays mounted while a file is open, at zero height with a spacer of the same content height:
       // GPUI keeps a scroll offset only for elements rendered every frame (issue #5).
-      .child(v_flex().id("files-tree").min_h(0).overflow_y_scrollbar()
+      .child(v_flex().id("files-tree").min_h(0).overflow_y_scrollbar().track_scroll(this.treeScroll)
         .when(!this.file, el => el.flex_1().p(TREE_PAD).children(this.rows(t, dark)))
         .when(Boolean(this.file), el => el.flex_none().h(0).p(0).child(div().flex_none().h(this.visible().length * ROW_H + 2 * TREE_PAD)))
         .on_drop((e, cx) => this.drop(e.paths, null, false))

@@ -4,5 +4,6 @@
   "cloned_from": {
     "name": "filer-pro",
     "version": "0.1.15"
-  }
+  },
+  "overlay": { "kind": "popup", "at": "top", "offset": 40, "width": 640, "height": 0.6 }
 }
