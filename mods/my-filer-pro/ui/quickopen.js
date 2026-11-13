@@ -57,7 +57,7 @@ export function createQuickOpen(target, deps, cx) {
       state.loading = false;
       const open = state.wantOpen;
       state.wantOpen = null;
-      if (open !== null) { state.pick(state.at, open, cx); return; }
+      if (open !== null) state.pick(state.at, open, cx);
       state.scroll.scroll_to_item(0);
       cx.notify();
     });
@@ -74,7 +74,7 @@ export function createQuickOpen(target, deps, cx) {
     const r = state.rows[i];
     if (r?.kind === "item") deps.onPick(r.item, open, { line: state.result?.line ?? null, column: state.result?.column ?? null }, cx);
   };
-  state.input.on("change", (_e, cx) => { state.query = state.input.value(); state.run(cx); });
+  state.input.on("change", (_e, cx) => { state.query = state.input.value(); state.wantOpen = null; state.run(cx); });
   // A query in flight holds Enter until its reply lands, so the pick is never a row of the previous query.
   state.input.on("submit", (e, cx) => {
     if (state.pending) state.wantOpen = !e.secondary;

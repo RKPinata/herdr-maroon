@@ -149,6 +149,8 @@ pollPick (render) ── expandPath(abs) ──► null: toast "Outside <root>",
                           │ open (skipped when open is false)
 ```
 
+The panel that takes a pick writes it back with `applied: true` (same id), and a panel copy that starts later skips applied picks. `filer-pro.goto-row` works the same way. A deferred Enter in the popup is dropped when the query changes.
+
 `revealInTree(rel, cx)` adds each missing parent folder to `this.folders`, sets `this.revealWanted = rel`, and calls `this.refresh(cx)` when a parent has no entries yet.
 
 The tree (`files-tree`) gets `.track_scroll(this.treeScroll)`. Its children follow the order of `visible()`, so a row's index there is its scroll index. In `render`, when `revealWanted` is set, nothing is loading and no file viewer is shown, `scrollToRow` runs and clears it. While the viewer is shown, the scroll waits until Back. A row that is not in the tree after loading (beyond `list_per_folder`, `list_total` or `tree_depth`) gives the toast "Beyond the list limit, not shown in the tree".
@@ -176,7 +178,7 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"`. Openin
 ⌕ [front▍]  1/2  [↑] [↓] [✕]
 ```
 
-- Opens with `cmd-f` while the panel has focus. The panel root has `track_focus(this.treeFocus)`, the tree takes focus on mouse-down, and the root's `on_key_down` catches `cmd-f`. Clicking the tree therefore takes the keyboard from the terminal until the terminal is clicked again.
+- Opens with `cmd-f` while the panel has focus. The panel root has `track_focus(this.treeFocus)`, and its `on_key_down` catches `cmd-f` (`e.keystroke === "cmd-f"`) and `escape` (closes an open row). A folder click takes focus, so `cmd-f` works after it; a file click leaves the keyboard where it was, so nvim keeps it. With the row already open, `cmd-f` focuses its input and leaves the selection.
 - Matches: case-insensitive substring of the row name, over `this.visible()`, skipping note rows. Collapsed folders have no entries, so visible rows are all loaded rows.
 - The cursor is `lastOpened`. A query change jumps to the first match. ⏎ and ↓ go to the next match, ⇧⏎ and ↑ to the previous one, wrapping. Each jump calls `scrollToRow`.
 - The counter is the cursor's place among the matches, `0/m` when the cursor is not a match, in `t.ansi1` when there is none.
@@ -191,12 +193,14 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"`. Openin
 
 - Opens from `📁→`, filled with the shown root, or from the pane menu, filled with that pane's folder. The input has focus.
 - Accepts an absolute path, `~/…` (this computer's home), or a path relative to the shown root. ⏎ runs `exec("test", ["-d", abs], { on })` on the panel's machine.
-- Success: `navigate(abs, cx)` and the row closes. ⌂ becomes active, because the root is no longer the terminal's folder.
-- Failure: "Not a folder: <path>" in `t.ansi1` inside the row; the row stays open.
+- Success: `navigate(abs, cx)` moves the root and `closeRow` gives focus back to the panel. ⌂ becomes active, because the root is no longer the terminal's folder.
+- Failure: the error in `t.ansi1` inside the row, and the row stays open: "Not a folder: <path>", "Cannot reach <machine or this computer>" when `exec` rejects, or "No terminal to follow: focus a terminal first" when `navigate` returns false and the folder is not already the root.
+- A reply is dropped when the panel's machine, the open row or the input text changed since Enter.
+- The `📁→` button needs a focused terminal pane, like Up.
 
 ### Pane menu (`my-menu`)
 
-`items()` case `"pane"` gets "Go to Folder in Files…" for terminal panes with a known folder. It writes `setShared("filer-pro.goto-row", { id, machine, cwd, at })` (`at` is `Date.now()`; a request older than 5 s is a leftover that a starting panel ignores) and runs `my-filer-pro.show`. Mod commands carry no arguments, so the folder travels in the shared key. The always-shown button copy of `my-filer-pro` answers `show` by showing the Files panel (`showSteps`). The panel picks the shared key up in `render` (`pollGotoRow`) and opens the go-to row filled with `cwd`.
+`items()` case `"pane"` gets "Go to Folder in Files…" for terminal panes with a known folder. It writes `setShared("filer-pro.goto-row", { id, machine, cwd, at })` (`at` is `Date.now()`; a request older than 5 s is a leftover that a starting panel ignores) and runs `my-filer-pro.show`. Mod commands carry no arguments, so the folder travels in the shared key. The always-shown button copy of `my-filer-pro` answers `show` by showing the Files panel (`showSteps`). The panel picks the shared key up in `render` (`pollGotoRow`) and opens the go-to row filled with `cwd`, leaving an open file first (`requestLeave`).
 
 ## Errors
 

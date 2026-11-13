@@ -200,8 +200,10 @@ export default class FilerPro extends View {
     // A stored request older than 5 s is a leftover and is not applied again; a newer one came from a popup or menu
     // that started before this copy, and the first render applies it.
     const leftover = (r) => Date.now() - (r?.at ?? 0) > 5000;
-    this.pickSeen = leftover(shared("filer-pro.pick")) ? shared("filer-pro.pick")?.id ?? null : null;
-    this.gotoRowSeen = leftover(shared("filer-pro.goto-row")) ? shared("filer-pro.goto-row")?.id ?? null : null;
+    // A request that another copy took (applied) is not applied again either.
+    const done = (r) => leftover(r) || r?.applied === true;
+    this.pickSeen = done(shared("filer-pro.pick")) ? shared("filer-pro.pick")?.id ?? null : null;
+    this.gotoRowSeen = done(shared("filer-pro.goto-row")) ? shared("filer-pro.goto-row")?.id ?? null : null;
     this.treeScroll = ScrollHandle.new();
     this.treeFocus = cx.focus_handle();
     this.row = null; this.findQuery = ""; this.gotoError = null;
@@ -434,6 +436,7 @@ export default class FilerPro extends View {
   // Quick open's pick: puts the Files panel on screen and hands it the file (pollPick), then closes the popup.
   // open false: reveal only. at: { line, column } from a "name:12:5" query.
   pickFile(item, open, at) {
+    if (!this.quick) return;
     const { root, on } = this.quick.target;
     const steps = showSteps(layout(), "filer-pro");
     if (!panelShown(layout(), "filer-pro") && !steps.length) { notify({ title: "Go to file", body: "This layout has no Files panel", level: "warning" }); return; }
@@ -812,17 +815,18 @@ export default class FilerPro extends View {
     return { ...loc, root, away, key: JSON.stringify(away ? { on: loc.on, space: loc.space, root } : loc) };
   }
 
-  // Shows root instead of the current one for the focused terminal (Up, Go to /; the terminal's own folder ends the
+  // Shows root instead of the current one for the focused terminal, true when it moved (Up, Go to /; the terminal's own folder ends the
   // override). Expanded folders, packages and the open file are carried over where they lie inside
   // the new root (lib/navigate.js carry). Refused while the open file has unsaved changes.
   navigate(root, cx) {
-    if (!root || !this.context || root === this.root) return;
-    if (this.edit?.dirty) { notify({ title: "Filer Pro", body: "Unsaved changes in the open file", level: "error" }); return; }
-    if (!setRoot(this.nav ??= new Map(), paneId(focused()), location(), root)) return;
+    if (!root || !this.context || root === this.root) return false;
+    if (this.edit?.dirty) { notify({ title: "Filer Pro", body: "Unsaved changes in the open file", level: "error" }); return false; }
+    if (!setRoot(this.nav ??= new Map(), paneId(focused()), location(), root)) return false;
     const state = carry({ folders: this.folders, packages: this.packages, file: this.file, lastOpened: this.lastOpened }, this.root, root);
     this.carried = { key: this.target().key, ...state };
     this.refresh(cx);
     cx.notify();
+    return true;
   }
 
   async loadFolder(path, context) {
@@ -924,6 +928,7 @@ export default class FilerPro extends View {
   // A click on a folder row (issue #90): it toggles; with double_click_folders the second press of a double click shows the
   // folder as root instead (lib/clicks.js folderClick). A package whose contents are shown keeps the plain toggle.
   clickFolder(path, bundle, e, cx) {
+    this.treeFocus.focus();
     const action = folderClick(e, this.conf.double_click_folders === true && !bundle);
     if (action === "toggle") this.toggle(path, cx);
     else if (action === "root") this.navigate(joinPath(this.root, path), cx);
@@ -987,11 +992,11 @@ export default class FilerPro extends View {
   // machine and a folder above the path reveals the file and opens it, once. Called from render, so it runs in a task.
   pollPick(cx) {
     const r = shared("filer-pro.pick");
-    if (!r?.id || r.id === this.pickSeen) return;
+    if (!r?.id || r.id === this.pickSeen || r.applied) return;
     this.pickSeen = r.id;
     const rel = expandPath({ machine: r.machine ?? null, folder: r.path }, this.root, this.on);
     if (!rel) { cx.spawn(async () => notify({ title: "Go to file", body: `Outside ${this.root ?? "the shown folder"}`, level: "warning" })); return; }
-    cx.spawn(async (cx) => this.requestLeave((cx) => this.openPicked(rel, r, cx), cx));
+    cx.spawn(async (cx) => { setShared("filer-pro.pick", { ...r, applied: true }); return this.requestLeave((cx) => this.openPicked(rel, r, cx), cx); });
   }
 
   // Reveals rel and, unless r.open is false, opens it: local text and Markdown in the tab's nvim at r.line, the rest in the viewer.
@@ -2022,8 +2027,8 @@ export default class FilerPro extends View {
       this.navButton("files-top", "slash", `Go to ${nav.top ?? "/"}`, t, nav.up ? (cx) => this.navigate(nav.top, cx) : null),
       this.navButton("files-back-terminal", "folder-tree", "Back to the terminal's folder", t, nav.away ? (cx) => this.navigate(nav.here, cx) : null),
       this.navButton("files-up", "corner-left-up", "Up one level", t, nav.up ? (cx) => this.navigate(nav.up, cx) : null),
-      this.navButton("files-goto", "folder-input", "Go to folder…", t, this.root ? (cx) => this.openRow("goto", null, cx) : null),
-      this.navButton("files-quick-open", "search", "Go to file (⌘K)", t, () => run("mod.open", { name: "my-filer-pro" })),
+      this.navButton("files-goto", "folder-input", "Go to folder…", t, this.root && paneId(focused()) ? (cx) => this.openRow("goto", null, cx) : null),
+      this.navButton("files-quick-open", "search", "Go to file", t, () => run("mod.open", { name: "my-filer-pro" })),
     ];
   }
 
@@ -2038,8 +2043,9 @@ export default class FilerPro extends View {
   // The row under the header: "find" (cmd-f) or "goto" (the folder button, my-menu's Go to Folder in Files). value:
   // the go-to row's text (default: the shown root).
   openRow(kind, value, cx) {
+    const opening = this.row !== kind;
     this.row = kind;
-    if (kind === "find") { this.findInput.focus(); if (this.findQuery) this.findStep(0, cx); }
+    if (kind === "find") { this.findInput.focus(); if (opening && this.findQuery) this.findStep(0, cx); }
     else { this.gotoError = null; this.gotoInput.set_value(value ?? this.root ?? ""); this.gotoInput.focus(); }
     cx.notify();
   }
@@ -2062,16 +2068,17 @@ export default class FilerPro extends View {
   // The go-to row's Enter: the folder must exist on the panel's machine; then it becomes the shown root.
   // shortcut: "~" is this computer's home also on a machine; type an absolute path there.
   submitGoto(cx) {
-    const abs = resolveGoto(this.gotoInput.value(), this.root ?? home(), home());
+    const asked = this.gotoInput.value();
+    const abs = resolveGoto(asked, this.root ?? home(), home());
     if (!abs) return;
     const on = this.on;
     cx.spawn(async (cx) => {
       const r = await exec("test", ["-d", abs], { on }).catch(() => null);
-      if (r?.code !== 0) { this.gotoError = `Not a folder: ${abs}`; cx.notify(); return; }
-      if (on !== this.on) return;
-      this.row = null;
-      this.navigate(abs, cx);
-      cx.notify();
+      if (!(on === this.on && this.row === "goto" && this.gotoInput.value() === asked)) return;
+      if (!r) { this.gotoError = `Cannot reach ${on ?? "this computer"}`; cx.notify(); return; }
+      if (r.code !== 0) { this.gotoError = `Not a folder: ${abs}`; cx.notify(); return; }
+      if (!this.navigate(abs, cx) && abs !== this.root) { this.gotoError = "No terminal to follow: focus a terminal first"; cx.notify(); return; }
+      this.closeRow(cx);
     });
   }
 
@@ -2079,15 +2086,18 @@ export default class FilerPro extends View {
   // folder, once, in the panel that shows the same machine. Called from render, so it runs in a task.
   pollGotoRow(cx) {
     const r = shared("filer-pro.goto-row");
-    if (!r?.id || r.id === this.gotoRowSeen) return;
+    if (!r?.id || r.id === this.gotoRowSeen || r.applied) return;
     this.gotoRowSeen = r.id;
     if ((r.machine ?? null) !== (this.on ?? null)) return;
-    cx.spawn(async (cx) => this.openRow("goto", r.cwd, cx));
+    cx.spawn(async (cx) => {
+      setShared("filer-pro.goto-row", { ...r, applied: true });
+      return this.requestLeave((cx) => { if (this.file) this.show(null); this.openRow("goto", r.cwd, cx); }, cx);
+    });
   }
 
-  rowSlot(t) {
+  rowSlot(t, visible) {
     if (this.row === "find") {
-      const matches = findMatches(this.visible(), this.findQuery);
+      const matches = findMatches(visible, this.findQuery);
       return findRow(t, { input: this.findInput, count: this.findQuery.trim() ? matchCount(matches, this.lastOpened) : "", none: Boolean(this.findQuery.trim()) && !matches.length },
         { onStep: (dir, cx) => this.findStep(dir, cx), onClose: (cx) => this.closeRow(cx) });
     }
@@ -2100,7 +2110,7 @@ export default class FilerPro extends View {
     if (!range) return div().flex_1().min_w(0).truncate().child(name);
     const current = path === this.lastOpened;
     return h_flex().flex_1().min_w(0).overflow_hidden()
-      .child(div().flex_none().child(name.slice(0, range[0])))
+      .child(div().min_w(0).truncate().child(name.slice(0, range[0])))
       .child(div().flex_none().rounded(3).bg(current ? t.accent : t.selection).text_color(current ? t.accent_foreground : t.foreground).child(name.slice(range[0], range[1])))
       .child(div().min_w(0).truncate().child(name.slice(range[1])));
   }
@@ -2231,9 +2241,9 @@ export default class FilerPro extends View {
 
   // The tree rows; the last opened file is marked with t.selected (issue #5). With show_sizes (issue #58) a size column
   // sits right-aligned directly left of the git mark, which then keeps a fixed slot at the edge so the sizes line up.
-  rows(t, dark) {
+  rows(t, dark, visible) {
     const sizes = this.conf.show_sizes === true ? shared("filer-pro.sizes") ?? {} : null, font = sizes ? settings().font_family : null;
-    return this.visible().map(({ path, entry, depth }) => {
+    return visible.map(({ path, entry, depth }) => {
       if (entry.note) return h_flex().id(`file-${path}-note`).h(ROW_H).flex_none().pl(8 + depth * 18 + 19).pr(8).items_center().text_size(12).text_color(t.dim).child(div().flex_1().min_w(0).truncate().child(entry.name));
       const open = this.folders.has(path), mark = this.marks[joinPath(this.root, path)];
       // A macOS package acts as a file until its contents are shown (lib/bundles.js); `dir` decides chevron, click and drop.
@@ -2293,14 +2303,17 @@ export default class FilerPro extends View {
     this.pollPick(cx);
     this.pollGotoRow(cx);
     this.revealPending(cx);
-    const t = theme(), dark = Boolean(settings().dark);
+    const t = theme(), dark = Boolean(settings().dark), visible = this.visible();
     if (this.doc?.diagrams && this.previewer && this.colorKey !== this.previewer.colorKey(t)) this.renderDiagrams(cx);
     // update_check false hides the hint at once; the stored result is cleared by the next hourly pass.
     const update = this.conf.update_check ? updateHint(shared("filer-pro.update"), this.version) : null;
     const bar = transfersBar(shared("filer-pro.jobs"), t, { onCancel: (id) => this.jobs.cancel(id).catch(() => {}), onDismiss: (id) => this.jobs.dismiss(id) });
     const root = v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .track_focus(this.treeFocus)
-      .on_key_down((e, cx) => { if (e.key === "f" && e.modifiers.platform && !this.file) { this.openRow("find", null, cx); cx.stop_propagation(); } })
+      .on_key_down((e, cx) => {
+        if (e.keystroke === "cmd-f" && !this.file) { this.openRow("find", null, cx); cx.stop_propagation(); }
+        else if (e.key === "escape" && this.row) { this.closeRow(cx); cx.stop_propagation(); }
+      })
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(boxy(t, "files-back", "←", { h: 20, px: 5, size: 13, onClick: (_e, cx) => this.requestLeave((cx) => { this.show(null); cx.notify(); }, cx) })))
         .child(div().flex_none().font_semibold().child("Files"))
@@ -2313,13 +2326,12 @@ export default class FilerPro extends View {
         .children(this.editTools(t))
         .when(Boolean(this.file) && Boolean(this.full), el => el.child(boxy(t, "files-full", svg(`${BASE}/maximize.svg`).size(13), { h: 20, px: 5, disabled: true }).tooltip("Open in full screen")))
         .when(Boolean(this.file) && !this.full, el => el.child(boxy(t, "files-full", svg(`${BASE}/maximize.svg`).size(13), { h: 20, px: 5, onClick: (_e, cx) => this.openFull(cx) }))))
-      .when(Boolean(this.row) && !this.file, el => el.child(this.rowSlot(t)))
+      .when(Boolean(this.row) && !this.file, el => el.child(this.rowSlot(t, visible)))
       // The tree stays mounted while a file is open, at zero height with a spacer of the same content height:
       // GPUI keeps a scroll offset only for elements rendered every frame (issue #5).
       .child(v_flex().id("files-tree").min_h(0).overflow_y_scrollbar().track_scroll(this.treeScroll)
-        .on_mouse_down("left", () => this.treeFocus.focus())
-        .when(!this.file, el => el.flex_1().p(TREE_PAD).children(this.rows(t, dark)))
-        .when(Boolean(this.file), el => el.flex_none().h(0).p(0).child(div().flex_none().h(this.visible().length * ROW_H + 2 * TREE_PAD)))
+        .when(!this.file, el => el.flex_1().p(TREE_PAD).children(this.rows(t, dark, visible)))
+        .when(Boolean(this.file), el => el.flex_none().h(0).p(0).child(div().flex_none().h(visible.length * ROW_H + 2 * TREE_PAD)))
         .on_drop((e, cx) => this.drop(e.paths, null, false))
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
