@@ -161,6 +161,33 @@ assert.equal(calls, 5);
   assert.equal(n, 5);
 }
 
+// A local entry is old after 60 s; a fifth root drops the oldest entry and removes its list file.
+{
+  let n = 0, clock = 0;
+  const calls = [];
+  const f = createFinder({
+    exec: async (cmd, args, o) => { calls.push({ cmd, args, on: o?.on ?? null }); if (cmd === "sh") n++; return { code: 0, stdout: "1 1 0\n", stderr: "" }; },
+    readTextFile: async () => null, writeTextFile: async () => {}, recentPath: "/x/r.json", localDir: "/x/finder", now: () => clock,
+  });
+  const first = f.files({ root: "/a", hide: hideNone });
+  await first.ready;
+  clock = 59999; f.files({ root: "/a", hide: hideNone });
+  assert.equal(n, 1);
+  clock = 60001; await f.files({ root: "/a", hide: hideNone }).ready;
+  assert.equal(n, 2);
+  for (const root of ["/b", "/c", "/d"]) await f.files({ root, hide: hideNone }).ready;
+  assert.equal(calls.filter((c) => c.cmd === "rm").length, 0);
+  await f.files({ root: "/e", hide: hideNone }).ready;
+  assert.deepEqual(calls.filter((c) => c.cmd === "rm"), [{ cmd: "rm", args: ["-f", "--", first.file], on: null }]);
+  // A machine's file goes through sh with the file as $1.
+  const m = f.files({ root: "/m", on: "vps", hide: hideNone });
+  await m.ready;
+  for (const root of ["/n", "/o", "/p", "/q"]) await f.files({ root, on: "vps", hide: hideNone }).ready;
+  const rm = calls.filter((c) => c.cmd === "sh" && c.args[2] === "x");
+  assert.equal(rm.length, 1);
+  assert.deepEqual([rm[0].on, rm[0].args[3]], ["vps", m.file]);
+}
+
 console.log("finder ok");
 
 // Selection moves skip group headers.

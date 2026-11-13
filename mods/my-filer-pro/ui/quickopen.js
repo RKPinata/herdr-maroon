@@ -25,7 +25,7 @@ function rowsOf(result) {
 
 // target: { root, on, hide } (root null: no folder); deps: { finder, onPick(item, open, at, cx) }, at: { line, column }.
 export function createQuickOpen(target, deps, cx) {
-  const state = { target, query: "", wantOpen: null, pending: false, result: null, rows: [], at: 0, error: null, loading: Boolean(target.root), seq: 0, recent: [] };
+  const state = { target, query: "", wantOpen: null, pending: false, result: null, rows: [], at: 0, error: null, loading: Boolean(target.root), seq: 0, recent: [], closed: false };
   state.input = InputState.new({ placeholder: "Go to file…" });
   state.handle = cx.focus_handle();
   state.scroll = VirtualListScrollHandle.new();
@@ -38,18 +38,18 @@ export function createQuickOpen(target, deps, cx) {
     state.pending = true;
     cx.spawn(async (cx) => {
       try {
-        if (target.on) { await cx.sleep(120); if (seq !== state.seq) return; }
+        if (target.on) { await cx.sleep(120); if (seq !== state.seq || state.closed) return; }
         if (state.entry.state !== "ready") await state.entry.ready;
-        if (seq !== state.seq) return;
+        if (seq !== state.seq || state.closed) return;
         if (state.entry.state === "error") throw new Error(state.entry.error);
         const result = await deps.finder.search(state.entry, text, { on: target.on, recent: state.recent, hide: target.hide });
-        if (seq !== state.seq) return;
+        if (seq !== state.seq || state.closed) return;
         state.result = result;
         state.rows = rowsOf(result);
         state.at = Math.max(0, state.rows.findIndex((r) => r.kind === "item"));
         state.error = null;
       } catch (e) {
-        if (seq !== state.seq) return;
+        if (seq !== state.seq || state.closed) return;
         state.error = String(e?.message ?? e);
         state.rows = [];
       }
@@ -57,7 +57,7 @@ export function createQuickOpen(target, deps, cx) {
       state.loading = false;
       const open = state.wantOpen;
       state.wantOpen = null;
-      if (open !== null) state.pick(state.at, open, cx);
+      if (open !== null && state.pick(state.at, open, cx)) return;
       state.scroll.scroll_to_item(0);
       cx.notify();
     });
@@ -69,10 +69,10 @@ export function createQuickOpen(target, deps, cx) {
     state.run(cx);
     cx.notify();
   };
-  // open false: reveal in the tree only (cmd-enter).
+  // open false: reveal in the tree only (cmd-enter). true: the pick was handed off and the popup closes.
   state.pick = (i, open, cx) => {
     const r = state.rows[i];
-    if (r?.kind === "item") deps.onPick(r.item, open, { line: state.result?.line ?? null, column: state.result?.column ?? null }, cx);
+    return r?.kind === "item" && deps.onPick(r.item, open, { line: state.result?.line ?? null, column: state.result?.column ?? null }, cx) === true;
   };
   state.input.on("change", (_e, cx) => { state.query = state.input.value(); state.wantOpen = null; state.run(cx); });
   // A query in flight holds Enter until its reply lands, so the pick is never a row of the previous query.
@@ -86,7 +86,7 @@ export function createQuickOpen(target, deps, cx) {
     state.run(cx);
   });
   state.input.focus();
-  cx.timer.after(600, () => state.input.focus());
+  cx.timer.after(600, () => { if (!state.closed) state.input.focus(); });
   return state;
 }
 

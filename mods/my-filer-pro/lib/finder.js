@@ -8,7 +8,7 @@ import { hiddenPath } from "./hidden.js";
 // The cap on a list file's size, and so on the time a listing takes.
 export const LIST_BYTES = 7340032;
 export const FILTER_MAX = 200;
-const RECENT_SHOWN = 10, RECENT_KEPT = 100, CACHE_MAX = 4, REMOTE_STALE_MS = 30000, ERROR_RETRY_MS = 2000;
+const RECENT_SHOWN = 10, RECENT_KEPT = 100, CACHE_MAX = 4, REMOTE_STALE_MS = 30000, LOCAL_STALE_MS = 60000, ERROR_RETRY_MS = 2000;
 
 // `<root> <dots> <file>`: writes one relative path per line to <file> and prints "<lines> <bytes> <cut>"; <cut> is 1
 // when the list reached LIST_BYTES and its partial last line was dropped. A leading ~/ in <file> is $HOME. rg (respects
@@ -107,12 +107,12 @@ export function createFinder({ exec, readTextFile, writeTextFile, recentPath, lo
   const cache = new Map(); // key -> entry, oldest first
 
   // The cache entry for a root: { state: "loading" | "ready" | "error", file, dots, count, truncated, error, ready: Promise }.
-  // A stale, failed or (machine) 30 s old entry is listed again; a stale one keeps serving its old file meanwhile.
+  // A stale, failed or old (machine 30 s, local 60 s) entry is listed again; a stale one keeps serving its old file meanwhile.
   // force lists again even while a failed entry is inside its back-off.
   function files({ root, on = null, hide }, { force = false } = {}) {
     const name = listName(on, root), key = name, dots = hide?.hide_dotfiles === true ? "0" : "1";
     let entry = cache.get(key);
-    const old = entry && (entry.stale || entry.dots !== dots || (entry.state === "error" && (force || now() - entry.at > ERROR_RETRY_MS)) || (on && now() - entry.at > REMOTE_STALE_MS));
+    const old = entry && (entry.stale || entry.dots !== dots || (entry.state === "error" && (force || now() - entry.at > ERROR_RETRY_MS)) || now() - entry.at > (on ? REMOTE_STALE_MS : LOCAL_STALE_MS));
     if (entry && (!old || entry.loading)) { cache.delete(key); cache.set(key, entry); return entry; }
     entry = entry ?? { state: "loading", file: on ? `~/.cache/filer-pro/finder/${name}.txt` : `${localDir}/${name}.txt`, count: 0, truncated: false, error: null, at: 0, dots, root, on };
     entry.stale = false;
@@ -130,7 +130,15 @@ export function createFinder({ exec, readTextFile, writeTextFile, recentPath, lo
       .finally(() => { entry.loading = false; entry.at = now(); });
     cache.delete(key);
     cache.set(key, entry);
-    while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+    while (cache.size > CACHE_MAX) {
+      const [k, dropped] = cache.entries().next().value;
+      cache.delete(k);
+      // A leading ~/ in the file is the machine's $HOME. A failed removal leaves the file behind.
+      (dropped.on
+        ? exec("sh", ["-c", 'case "$1" in "~/"*) set -- "$HOME/${1#\\~/}";; esac; rm -f -- "$1"', "x", dropped.file], { on: dropped.on })
+        : exec("rm", ["-f", "--", dropped.file], { on: dropped.on })
+      ).catch(() => {});
+    }
     return entry;
   }
 

@@ -68,7 +68,7 @@ The finder lives in module scope. Herdr shares module code between every copy of
 
 With `hide_dotfiles` on, paths with a dot part are dropped. The list stops at 7 MiB (`head -c`); the partial last line is dropped and `truncated` is set. List files live in `~/.config/herdr-app/data/filer-pro/finder/` on this computer and in `~/.cache/filer-pro/finder/` on a machine (a leading `~/` in the file argument is that machine's `$HOME`).
 
-An LRU keeps 4 entries. A local entry goes stale on a watch batch under the root or on Refresh; a machine's entry also after 30 s. An entry also records the `hide_dotfiles` value it was listed with, and a call with the other value lists again. A failed entry is listed again after 2 s. A stale entry keeps its old list file while the new one is written. Windows has no listing: `sh` is required.
+An LRU keeps 4 entries. A local entry goes stale on a watch batch under the root or on Refresh, and after 60 s; a machine's entry after 30 s. An entry the LRU drops has its list file removed (`rm -f`, on its machine); a failed removal is ignored. An entry also records the `hide_dotfiles` value it was listed with, and a call with the other value lists again. A failed entry is listed again after 2 s. A stale entry keeps its old list file while the new one is written. Windows has no listing: `sh` is required.
 
 ### Ranking
 
@@ -86,7 +86,7 @@ Measured in QuickJS, ranking 200 hits takes 11 to 156 ms. fzf filters 47,000 pat
 
 ### Recently opened
 
-`~/.config/herdr-app/filer-pro/recent.json` holds `{ v: 1, items: [{ on, path, at }] }` with absolute paths, newest first, at most 100. Writes use `writeTextFile` with the `expected` text; on a conflict the file is read again and the write retried once, then dropped. An open from a tree click and every pick record an entry.
+`~/.config/herdr-app/filer-pro/recent.json` holds `{ v: 1, items: [{ on, path, at }] }` with absolute paths, newest first, at most 100. Writes use `writeTextFile` with the `expected` text; on a conflict the file is read again and the write retried once, then dropped. An opened pick and an opening tree click record an entry; a reveal-only pick (cmd-enter) does not.
 
 An empty query shows the recent files under the root. A typed query ranks the recent files with the same scorer, shows up to 10 in their own group and removes them from the file results.
 
@@ -98,6 +98,7 @@ An empty query shows the recent files under the root. A typed query ranks the re
 - `keys.json`: `"global": { "cmd-k": "mod.open:my-filer-pro" }`. The binding is global, so it works from a terminal, nvim or another mod, and it replaces `cmd-k` everywhere.
 - The ⌕ button in the Files header runs `mod.open` with the same name.
 - A popup copy has `props().overlay` and no `props().view`.
+- While Files is hidden, the popup searches the terminal's folder; a pick outside the root the panel shows gives the toast "Outside <root>".
 - The panel publishes its shown root as `shared("filer-pro.root") = { root, on, hide }` whenever its context changes. The popup searches that root while the Files panel is on screen, else the focused terminal's folder.
 - Focus: `input.focus()`, then once more after 600 ms, as the `picker` mod does.
 
@@ -160,7 +161,7 @@ The tree (`files-tree`) gets `.track_scroll(this.treeScroll)`. Its children foll
 | Local text or Markdown | `openInNvim(rel, cx, ":line:column")` |
 | Anything else | `show(rel)`: the viewer, or the binary message with its Open button |
 
-A file inside a macOS package reveals only down to the package row.
+A file inside a macOS package has no row: the reveal scrolls to and selects the deepest ancestor that has one, the package row. The toast appears only when no ancestor has a row either.
 
 ## Header and row slot
 
@@ -178,7 +179,7 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"`. Openin
 ⌕ [front▍]  1/2  [↑] [↓] [✕]
 ```
 
-- Opens with `cmd-f` while the panel has focus. The panel root has `track_focus(this.treeFocus)`, and its `on_key_down` catches `cmd-f` (`e.keystroke === "cmd-f"`) and `escape` (closes an open row). A folder click takes focus, so `cmd-f` works after it; a file click leaves the keyboard where it was, so nvim keeps it. With the row already open, `cmd-f` focuses its input and leaves the selection.
+- Opens with `cmd-f` while the panel has focus. A zero-size child in the header (`files-keys`) has `track_focus(this.treeFocus)`; key events bubble from it to the panel root, whose `on_key_down` catches `cmd-f` (`e.keystroke === "cmd-f"`) and `escape` (closes an open row while no file is shown, so Esc in the editor goes to nvim). A folder click takes focus, so `cmd-f` works after it; a file click leaves the keyboard where it was, so nvim keeps it. With the row already open, `cmd-f` focuses its input and leaves the selection.
 - Matches: case-insensitive substring of the row name, over `this.visible()`, skipping note rows. Collapsed folders have no entries, so visible rows are all loaded rows.
 - The cursor is `lastOpened`. A query change jumps to the first match. ⏎ and ↓ go to the next match, ⇧⏎ and ↑ to the previous one, wrapping. Each jump calls `scrollToRow`.
 - The counter is the cursor's place among the matches, `0/m` when the cursor is not a match, in `t.ansi1` when there is none.
@@ -200,7 +201,7 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"`. Openin
 
 ### Pane menu (`my-menu`)
 
-`items()` case `"pane"` gets "Go to Folder in Files…" for terminal panes with a known folder. It writes `setShared("filer-pro.goto-row", { id, machine, cwd, at })` (`at` is `Date.now()`; a request older than 5 s is a leftover that a starting panel ignores) and runs `my-filer-pro.show`. Mod commands carry no arguments, so the folder travels in the shared key. The always-shown button copy of `my-filer-pro` answers `show` by showing the Files panel (`showSteps`). The panel picks the shared key up in `render` (`pollGotoRow`) and opens the go-to row filled with `cwd`, leaving an open file first (`requestLeave`).
+`items()` case `"pane"` gets "Go to Folder in Files…" for terminal panes with a known folder. It writes `setShared("filer-pro.goto-row", { id, machine, cwd, at })` (`at` is `Date.now()`; a request older than 5 s is a leftover that a starting panel ignores) and runs `my-filer-pro.show`. Mod commands carry no arguments, so the folder travels in the shared key. The always-shown button copy of `my-filer-pro` answers `show` by showing the Files panel (`showSteps`). The panel picks the shared key up in `render` (`pollGotoRow`) and opens the go-to row filled with `cwd`, leaving an open file first (`requestLeave`). A request for another machine than the panel shows gives the toast "Files shows another machine" and is not marked applied. The folder check runs `test -d` with a 10 s timeout.
 
 ## Errors
 

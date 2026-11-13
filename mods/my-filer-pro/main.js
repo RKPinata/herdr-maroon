@@ -435,14 +435,16 @@ export default class FilerPro extends View {
 
   // Quick open's pick: puts the Files panel on screen and hands it the file (pollPick), then closes the popup.
   // open false: reveal only. at: { line, column } from a "name:12:5" query.
+  // true when the pick went to the panel and the popup is closing.
   pickFile(item, open, at) {
-    if (!this.quick) return;
+    if (!this.quick) return false;
     const { root, on } = this.quick.target;
     const steps = showSteps(layout(), "filer-pro");
-    if (!panelShown(layout(), "filer-pro") && !steps.length) { notify({ title: "Go to file", body: "This layout has no Files panel", level: "warning" }); return; }
+    if (!panelShown(layout(), "filer-pro") && !steps.length) { notify({ title: "Go to file", body: "This layout has no Files panel", level: "warning" }); return false; }
     for (const [command, args] of steps) run(command, args);
     setShared("filer-pro.pick", { id: this.newId(), machine: on ?? null, path: joinPath(root, item.path), open, line: at.line, column: at.column, at: Date.now() });
     try { closeOverlay(props().overlay); } catch {}
+    return true;
   }
 
   // Shows the last download in the Finder (toast action "filer-pro.reveal").
@@ -692,7 +694,7 @@ export default class FilerPro extends View {
   // Esc or closing the dialog without a choice counts as Cancel.
   // A dirty edit buffer is written to unsaved/ first (the app closes the dialog or panel without asking).
   async close() {
-    if (this.quick) { this.quick.scroll.release(); this.quick.input.release(); this.quick.handle?.release?.(); this.quick = null; return; }
+    if (this.quick) { this.quick.closed = true; this.quick.scroll.release(); this.quick.input.release(); this.quick.handle?.release?.(); this.quick = null; return; }
     const e = this.edit;
     if (e) {
       if (e.dirty) await this.keepUnsaved(e);
@@ -1031,7 +1033,11 @@ export default class FilerPro extends View {
     const want = this.revealWanted;
     if (!want || this.file || this.loading || this.pending.size) return;
     this.revealWanted = null;
-    if (!this.scrollToRow(want)) cx.spawn(async () => notify({ title: "Go to file", body: "Beyond the list limit, not shown in the tree", level: "info" }));
+    if (this.scrollToRow(want)) return;
+    // A file inside a macOS package has no row: the package's row (or the deepest ancestor with one) takes the selection.
+    const near = ancestorsOf(want).reverse().find((folder) => this.scrollToRow(folder));
+    if (near) { this.lastOpened = near; cx.notify(); return; }
+    cx.spawn(async () => notify({ title: "Go to file", body: "Beyond the list limit, not shown in the tree", level: "info" }));
   }
 
   // An opened file for quick open's recently opened group.
@@ -2073,7 +2079,7 @@ export default class FilerPro extends View {
     if (!abs) return;
     const on = this.on;
     cx.spawn(async (cx) => {
-      const r = await exec("test", ["-d", abs], { on }).catch(() => null);
+      const r = await exec("test", ["-d", abs], { on, timeout: 10000 }).catch(() => null);
       if (!(on === this.on && this.row === "goto" && this.gotoInput.value() === asked)) return;
       if (!r) { this.gotoError = `Cannot reach ${on ?? "this computer"}`; cx.notify(); return; }
       if (r.code !== 0) { this.gotoError = `Not a folder: ${abs}`; cx.notify(); return; }
@@ -2088,7 +2094,10 @@ export default class FilerPro extends View {
     const r = shared("filer-pro.goto-row");
     if (!r?.id || r.id === this.gotoRowSeen || r.applied) return;
     this.gotoRowSeen = r.id;
-    if ((r.machine ?? null) !== (this.on ?? null)) return;
+    if ((r.machine ?? null) !== (this.on ?? null)) {
+      cx.spawn(async () => notify({ title: "Go to folder", body: "Files shows another machine", level: "warning" }));
+      return;
+    }
     cx.spawn(async (cx) => {
       setShared("filer-pro.goto-row", { ...r, applied: true });
       return this.requestLeave((cx) => { if (this.file) this.show(null); this.openRow("goto", r.cwd, cx); }, cx);
@@ -2309,12 +2318,13 @@ export default class FilerPro extends View {
     const update = this.conf.update_check ? updateHint(shared("filer-pro.update"), this.version) : null;
     const bar = transfersBar(shared("filer-pro.jobs"), t, { onCancel: (id) => this.jobs.cancel(id).catch(() => {}), onDismiss: (id) => this.jobs.dismiss(id) });
     const root = v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
-      .track_focus(this.treeFocus)
       .on_key_down((e, cx) => {
         if (e.keystroke === "cmd-f" && !this.file) { this.openRow("find", null, cx); cx.stop_propagation(); }
-        else if (e.key === "escape" && this.row) { this.closeRow(cx); cx.stop_propagation(); }
+        else if (e.key === "escape" && this.row && !this.file) { this.closeRow(cx); cx.stop_propagation(); }
       })
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
+        // Takes the tree's keys (cmd-f, Esc); they bubble from here to the root.
+        .child(div().id("files-keys").absolute().size(0).track_focus(this.treeFocus))
         .when(Boolean(this.file), el => el.child(boxy(t, "files-back", "←", { h: 20, px: 5, size: 13, onClick: (_e, cx) => this.requestLeave((cx) => { this.show(null); cx.notify(); }, cx) })))
         .child(div().flex_none().font_semibold().child("Files"))
         .when(Boolean(update), el => el.child(this.tool("files-update", div().text_color(t.ansi4).child(`● ${update.version} available`), t, (cx) => cx.open_url(update.url)).flex_none()))
