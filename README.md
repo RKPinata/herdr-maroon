@@ -56,8 +56,8 @@ An agent can do all of this. Point it at this folder and the section "Layouts an
 ## What it needs
 
 - **Fonts:** Monaspace Neon (terminal) and IBM Plex Mono (UI).
-- **Programs:** `git`, `gh` (signed in), `python3`, `jq`. `node` for Mermaid previews in `my-filer-pro`. Neovim 0.10+ and Rust (`rustup`) for `my-nvim`.
-- **Keys:** no bindings ship. Bind `mod.open:agent-switcher` (for example `ctrl-tab`), `mod.open:agent-resume`, `mod.open:my-nvim` (for example `cmd-e`) and `my-nvim.pick` (for example `cmd-o`) in your `keys.json`. Inside the switcher, `agent-switcher.next` and `agent-switcher.prev` move.
+- **Programs:** `git`, `gh` (signed in), `python3`, `jq`. `node` for Mermaid previews in `my-filer-pro`. `rg` and `fzf` make `my-filer-pro`'s quick open fast (it falls back to `git`, `find` and `grep`). Neovim 0.10+ and Rust (`rustup`) for `my-nvim`.
+- **Keys:** no bindings ship. Bind `mod.open:agent-switcher` (for example `ctrl-tab`), `mod.open:agent-resume`, `mod.open:my-nvim` (for example `cmd-e`), `my-nvim.pick` (for example `cmd-o`) and `mod.open:my-filer-pro` (quick open, for example `cmd-k`) in your `keys.json`. Inside the switcher, `agent-switcher.next` and `agent-switcher.prev` move.
 - **Projects folder:** `my-spaces` lists repos in `~/Repo`. Set the layout block's `projects` prop to use another folder.
 - **Linear:** the `linear` mod reads an API key from the macOS keychain, service `herdr-linear`. It is macOS only.
 - **Annotator helper:** `my-annotator` runs `~/.local/bin/herdr-annotator`. Install it from [jakub-tucek/herdr-annotator](https://github.com/jakub-tucek/herdr-annotator).
