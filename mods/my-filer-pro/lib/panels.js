@@ -32,3 +32,13 @@ export function panelShown(root, id) {
   if (body.type === "stack") return body.active === id && find(body, id) !== null;
   return (body.children ?? []).some((c) => c.id === id && !c.hidden);
 }
+
+// The run() calls ([command, args] pairs) that put panel block `id` on screen; [] when it is shown already or the
+// layout has no panel.
+export function showSteps(root, id) {
+  const panel = find(root, "panel"), body = find(root, "panel-body");
+  if (!panel || !body || panelShown(root, id)) return [];
+  if (body.type === "stack") return [["layout.select", { stack: "panel-body", child: id }], ["layout.show", { id: "panel" }]];
+  const want = [...(panel.hidden ? [] : (body.children ?? []).filter((c) => !c.hidden).map((c) => c.id)), id];
+  return [...(body.children ?? []).map((c) => [want.includes(c.id) ? "layout.show" : "layout.hide", { id: c.id }]), ["layout.show", { id: "panel" }]];
+}
