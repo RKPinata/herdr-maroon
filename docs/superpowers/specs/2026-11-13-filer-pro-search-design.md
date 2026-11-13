@@ -3,7 +3,7 @@
 Search features for the `my-filer-pro` mod:
 
 1. A quick-open finder that ranks files like VS Code's Cmd+P.
-2. A floating modal to use it, opened with `cmd-k` or a header button.
+2. A popup to use it, opened with `cmd-k` or a header button.
 3. Reveal in tree: the picked file opens, and the tree expands to it and scrolls to it.
 4. A find row that matches names in the visible tree.
 5. A go-to row that moves the Files root to a typed path, also opened from the pane menu.
@@ -14,119 +14,110 @@ Content search (text inside files) is not part of this design.
 
 ```
  ⌘K / ⌕ button                    ⌘F (tree focused)     📁→ button / pane menu
-      │                                 │                      │
-      ▼                                 ▼                      ▼
-┌──────────────────┐           ┌──────────────────┐   ┌──────────────────┐
-│ ui/quickopen.js  │           │ find row          │   │ go-to row         │
-│ overlay view     │           │ (one row slot under the header)          │
-│ "find"           │           └────────┬─────────┘   └────────┬─────────┘
+ (mod.open:my-filer-pro)                │                      │
+      │                                 ▼                      ▼
+      ▼                        ┌──────────────────┐   ┌──────────────────┐
+┌──────────────────┐           │ find row          │   │ go-to row         │
+│ ui/quickopen.js  │           │ (one row slot under the header)          │
+│ popup copy       │           └────────┬─────────┘   └────────┬─────────┘
 └───┬─────────▲────┘                    │ scrollToRow          │ navigate(path)
-    │ query   │ {recent, files}         ▼                      ▼
+    │ search  │ {recent, files}         ▼                      ▼
     ▼         │                ┌──────────────────────────────────────────┐
 ┌──────────────────┐  pick     │ main.js panel                             │
 │ lib/finder.js    │ ────────► │ pollPick → openPicked → revealInTree      │
-│ list + rank      │ setShared │ treeScroll (one ScrollHandle)             │
-│ recent.json      │ "filer-   └──────────────────────────────────────────┘
+│ list file + fzf  │ setShared │ treeScroll (one ScrollHandle)             │
+│ lib/fuzzy.js     │ "filer-   └──────────────────────────────────────────┘
 └──────────────────┘  pro.pick"
 ```
 
 | Unit | Job | Depends on |
 |---|---|---|
-| `lib/finder.js` | Lists files, caches the list per root and machine, ranks matches, keeps the recent list | `exec` and file functions passed in |
-| `ui/quickopen.js` | The modal: input, virtual list, two groups, keyboard | a finder session |
+| `lib/fuzzy.js` | VS Code's quick-open scorer: score and compare one file | nothing |
+| `lib/finder.js` | Writes a root's file list to a file on its machine, filters it per query with `fzf` (or `grep`), ranks the hits with `lib/fuzzy.js`, keeps the recent list | `exec` and file functions passed in |
+| `lib/treefind.js` | Find-row matching and stepping, a path's parent folders, go-to path resolution | nothing |
+| `ui/quickopen.js` | The popup: input, virtual list, two groups, keyboard | a finder |
+| `ui/treerow.js` | The find row and the go-to row | nothing |
 | `revealInTree`, `scrollToRow` (main.js) | Expand parent folders, load them, scroll to a row | `refresh`, `visible()`, `treeScroll` |
-| `pollPick`, `openPicked` (main.js) | Take a pick from the modal and open the file by kind | `expandPath`, `show`, `openInNvim` |
-| Find row (main.js, helpers in `lib/tree.js`) | Substring match on visible rows, `n/m` counter, step between matches | `scrollToRow`, `lastOpened` |
-| Go-to row (main.js) | Resolve a typed path and move the root there | `navigate`, `exec test -d` |
-| Pane-menu item (`my-menu`) | Show Files and open its go-to row with the pane's folder | `run`, `layout.show` |
+| `pollPick`, `openPicked` (main.js) | Take a pick from the popup and open the file | `expandPath`, `show`, `openInNvim` |
+| Pane-menu item (`my-menu`) | Ask Files to open its go-to row with the pane's folder | `setShared`, `run` |
 
 ## Finder engine: `lib/finder.js`
 
-The module is pure apart from the functions passed into it, like `lib/requests.js`.
+Mods run in QuickJS, which has no JIT, and Herdr interrupts a job after about 0.5 s. Measured on `~/Repo` (47,000 files), QuickJS scores about 220 paths per 60 ms with the full scorer. Ranking a whole repository in JavaScript is therefore out; native tools filter, and JavaScript ranks at most 200 hits.
 
 ```js
-const finder = createFinder({ exec, readTextFile, writeTextFile, appHome, platform });
-const s = finder.session({ root, on, hide });   // one per modal open
-s.query("msg/index:40");
-// → { recent: Item[], files: Item[], total, truncated, loading, line: 40, column: null }
+const finder = createFinder({ exec, readTextFile, writeTextFile, recentPath, localDir, now });
+const entry = finder.files({ root, on, hide });   // { state, file, count, truncated, error, ready }
+const result = await finder.search(entry, "msg/index:40", { on, recent, hide });
+// → { recent: Item[], files: Item[], line: 40, column: null }
 // Item: { path: "src/msg/index.vue", label: "index.vue", dir: "src/msg", score,
 //         labelHits: [[0, 5]], dirHits: [[4, 7]] }
-s.onChange(fn);                                  // the list arrived or was replaced
-finder.invalidate({ root, on });                 // a watch batch: the list is stale
-finder.recordOpen({ root, on, path });
+finder.invalidate({ root, on });                  // a watch batch or Refresh: list again next time
+finder.recordOpen({ on, path });                  // absolute path, into recent.json
 ```
+
+The finder lives in module scope. Herdr shares module code between every copy of a mod, so the panel and the popup use one cache.
 
 ### Listing
 
-One `exec("sh", ["-c", FIND_SCRIPT, root], { on, timeout: 15000 })` runs the first tool that exists on the machine:
+`FILES_SCRIPT` runs once per root through `exec("sh", …, { on, timeout: 15000 })`, on the machine of the root. It writes one relative path per line to a list file and prints the line and byte counts. It uses the first tool that exists:
 
 1. `rg --files --hidden -g '!.git' -g '!node_modules'` (without `--hidden` when `hide_dotfiles` is on)
 2. `git ls-files -co --exclude-standard`, inside a repository
 3. `find . -name .git -prune -o -name node_modules -prune -o -type f -print`
 
-The output passes through `head -c 7340032` and the last partial line is dropped, because `exec` returns at most 8 MiB. A cut list sets `truncated`. Windows uses `rg` when installed, else `Get-ChildItem -Recurse -File`, following the PowerShell branch in `main.js`. System files are filtered from the final results with `isSystemFile`.
+With `hide_dotfiles` on, paths with a dot part are dropped. The list stops at 7 MiB (`head -c`); then `truncated` is set. List files live in `~/.config/herdr-app/data/filer-pro/finder/` on this computer and in `/tmp` on a machine.
 
-Listing starts when the modal opens. An LRU keeps 4 lists keyed by `${on}\0${root}`. A local list goes stale on a watch batch; a remote list after 30 s. A stale list is served while a new one loads.
+An LRU keeps 4 entries. A local entry goes stale on a watch batch under the root or on Refresh; a machine's entry also after 30 s. A stale entry keeps its old list file while the new one is written. Windows has no listing: `sh` is required.
 
 ### Ranking
 
-`fuzzyScorer.ts` from VS Code (MIT) is ported: `prepareQuery`, `computeCharScore`, `doScoreFuzzy`, label-then-path scoring and the tie-breakers of `compareItemsByFuzzyScore`. `THIRD_PARTY_NOTICES.md` carries its license.
+Each query runs `SEARCH_SCRIPT` on the list file: `fzf --filter <query> --scheme=path | head -n 200`, or `grep -i -E <pattern> | head -n 200` where `fzf` is missing. The fzf query has fzf's operators stripped. The grep pattern is the longest word's characters with `.*` between them.
+
+The hits are ranked with `lib/fuzzy.js`, a port of VS Code's `fuzzyScorer.ts` (MIT, commit `f6c56f75d0f9ff0774c14303046f43acfde240f3`). `THIRD_PARTY_NOTICES.md` carries its license.
 
 - A file-name match scores above a path match.
 - A query that contains `/` scores against the whole path.
-- A query with spaces needs every piece to match.
+- A query with spaces needs every word to match.
 - A trailing `:120` or `:120:5` becomes `line` and `column` and is removed from the query.
+- System files are dropped from the hits (`hiddenPath`).
 
-### Speed
-
-Mods run in QuickJS, which has no JIT.
-
-- The list is lowercased and split once with native calls.
-- A prefilter checks each query character with `indexOf` and rejects most paths before scoring.
-- When the new query extends the last one, only the last survivors (an `Int32Array` of indexes) are scanned.
-- At most 5,000 survivors get the full score; above that, only file names are scored. Results stop at 200.
-- No debounce while a query takes under 30 ms; above that, 60 ms. A sequence id drops stale replies.
-
-A `finder-bench` command, gated on the `perf` config flag, lists `~/Repo` and times fresh queries (`m`, `ma`, `main`, `mainjs`, `msg/index`, `lib fin`, `zzzz`) and the narrowing run `m`, `ma`, `mai`, `main`, five times each, into `perf.jsonl`. When a fresh query's median is over 80 ms, or a 1-character query's max is over 150 ms, ranking for lists over 20,000 files on this Mac goes to `fzf --filter "$q" < <list file> | head -n 1000`, and the JS scorer reranks those 1,000. fzf's special characters are stripped from the query first.
+Measured in QuickJS, ranking 200 hits takes 11 to 156 ms. fzf filters 47,000 paths in 30 to 40 ms, process start included.
 
 ### Recently opened
 
-`data/filer-pro/recent.json` holds `{ v: 1, items: [{ on, path, at }] }` with absolute paths, newest first, at most 100. Writes use `writeTextFile` with the `expected` text; on a conflict the file is read again and the write retried once, then dropped. Every open from the panel and every pick records an entry.
+`~/.config/herdr-app/filer-pro/recent.json` holds `{ v: 1, items: [{ on, path, at }] }` with absolute paths, newest first, at most 100. Writes use `writeTextFile` with the `expected` text; on a conflict the file is read again and the write retried once, then dropped. An open from a tree click and every pick record an entry.
 
-An empty query returns the recent files under the root. A typed query scores the recent files with the same scorer, puts up to 10 in `recent` and removes them from `files`.
+An empty query shows the recent files under the root. A typed query ranks the recent files with the same scorer, shows up to 10 in their own group and removes them from the file results.
 
-## Quick-open modal: `ui/quickopen.js`
+## Quick-open popup: `ui/quickopen.js`
 
 ### Opening
 
-- `keys.json`: `"global": { "cmd-k": "my-filer-pro.find" }`. The binding is global so it works from a terminal, nvim or another mod, and it replaces `cmd-k` everywhere.
-- The ⌕ button in the Files header calls the same `openFinder(cx)`.
-- With Files shown, the panel copy opens the modal with its own `root` and `on`. With Files hidden, the button copy uses `location()`, the focused terminal's folder.
-- `openFinder` closes the open modal first (`this.finderId`), so modals never stack.
-
-```js
-openOverlay({ mod: "my-filer-pro", kind: "popup", at: "top", offset: 40, width: 640, height: 0.6,
-              props: { view: "find", root, machine } });
-```
-
-When `at: "top"` is ignored, the modal is placed with `at: { x, y }`: centered on x, 40 px from the top. Focus: `input.focus()`, then once more after 600 ms, as the `picker` mod does.
+- `mod.json` of `my-filer-pro` has `"overlay": { "kind": "popup", "at": "top", "offset": 40, "width": 640, "height": 0.6 }`. `mod.open:my-filer-pro` opens it there and toggles it.
+- `keys.json`: `"global": { "cmd-k": "mod.open:my-filer-pro" }`. The binding is global, so it works from a terminal, nvim or another mod, and it replaces `cmd-k` everywhere.
+- The ⌕ button in the Files header runs `mod.open` with the same name.
+- A popup copy has `props().overlay` and no `props().view`.
+- The panel publishes its shown root as `shared("filer-pro.root") = { root, on, hide }` whenever its context changes. The popup searches that root while the Files panel is on screen, else the focused terminal's folder.
+- Focus: `input.focus()`, then once more after 600 ms, as the `picker` mod does.
 
 ### Layout
 
 ```
-┌ Go to file · ~/Repo · on <machine>                    [Esc] ┐
-│ ⌕ [vue▍                                                   ] │
-│ recently opened                                             │
-│ ▌📄 vue-legacy-patterns.md   app/.claude/rules              │
-│ file results                                                │
-│  V index.vue                 src/app/modules/messages       │
-└─────────────────────────────────────────────────────────────┘
+┌ Go to file  ~/Repo                                     [Esc] ┐
+│ ⌕ [vue▍                                                    ] │
+│ recently opened                                              │
+│ ▌📄 vue-legacy-patterns.md   app/.claude/rules               │
+│ file results                                                 │
+│  V index.vue                 src/app/modules/messages        │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 - `v_virtual_list` with 30 px rows and 24 px group headers, `track_scroll` and a vertical `Scrollbar`.
 - Icons from `lib/icons.js`. Matched characters in `t.accent`, semibold. The folder path in `t.foreground` at 11.5 px.
 - The selected row is drawn with `card()` from `boxy.js`.
-- States: a spinner while loading; the error in `t.ansi1` with a Retry button; "No matching files"; "Listed first N files" when truncated.
+- States: "Listing files…"; the error in `t.ansi1` with a Retry button; "No matching files"; "Type to find a file"; "Listed the first N files" when the list was cut.
+- On a machine, a query waits 120 ms for more typing before it runs.
 
 ### Keys
 
@@ -140,12 +131,12 @@ When `at: "top"` is ignored, the modal is placed with `at: { x, y }`: centered o
 
 ### Handoff
 
-```js
-setShared("filer-pro.pick", { id, machine, path /* absolute */, open: true });
-closeOverlay(overlay);
-```
+The popup shows the Files panel when it is hidden (`showSteps` in `lib/panels.js`), then:
 
-When Files is hidden, the modal shows it with `layout.show` before the handoff.
+```js
+setShared("filer-pro.pick", { id, machine, path /* absolute */, open, line, column });
+closeOverlay(props().overlay);
+```
 
 ## Reveal in tree (main.js)
 
@@ -155,37 +146,27 @@ pollPick (render) ── expandPath(abs) ──► null: toast "Outside <root>",
                           ▼
                   openPicked(rel), inside requestLeave
                           │ revealInTree(rel)
-                          │ open by kind (skipped when open is false)
+                          │ open (skipped when open is false)
 ```
 
-`revealInTree(rel, cx)`:
+`revealInTree(rel, cx)` adds each missing parent folder to `this.folders`, sets `this.revealWanted = rel`, and calls `this.refresh(cx)` when a parent has no entries yet.
 
-1. Add each missing parent folder (`a`, `a/b`, …) to `this.folders`, parents first. A package parent also goes into `this.packages`.
-2. Set `this.revealWanted = rel`.
-3. When a parent has no entries yet, call `this.refresh(cx)`.
-
-The tree (`files-tree`) gets `.track_scroll(this.treeScroll)`, a `ScrollHandle` made in `init`. Its children follow the order of `visible()`, so a row's index there is its scroll index. In `render`, when `revealWanted` is set, nothing is loading and no file viewer is shown, `scrollToRow(revealWanted)` runs and clears it. While the viewer is shown, the scroll waits until Back.
-
-```js
-scrollToRow(path) { const i = this.visible().findIndex((r) => r.path === path); if (i >= 0) this.treeScroll.scroll_to_item(i); }
-```
+The tree (`files-tree`) gets `.track_scroll(this.treeScroll)`. Its children follow the order of `visible()`, so a row's index there is its scroll index. In `render`, when `revealWanted` is set, nothing is loading and no file viewer is shown, `scrollToRow` runs and clears it. While the viewer is shown, the scroll waits until Back. A row that is not in the tree after loading (beyond `list_per_folder`, `list_total` or `tree_depth`) gives the toast "Beyond the list limit, not shown in the tree".
 
 | Picked | Action |
 |---|---|
-| Local text or Markdown | `openInNvim(rel)` |
-| Other text, image, PDF, any remote file | `show(rel)` |
-| Local binary | `show(rel)`: the message view with its Open button |
-| Package or folder | `lastOpened = rel`; a folder is also expanded |
+| Local text or Markdown | `openInNvim(rel, cx, ":line:column")` |
+| Anything else | `show(rel)`: the viewer, or the binary message with its Open button |
 
-A file beyond `list_per_folder`, `list_total` or `tree_depth` opens with the toast "Beyond the list limit, not shown in the tree". A file hidden by settings opens without a row.
+A file inside a macOS package reveals only down to the package row.
 
 ## Header and row slot
 
 ```
-Files  Repo   [ / ⌂ ↰ 📁→ ] [⌕] ⟳ ⚙
+Files  Repo   [/] [⌂] [↰] [📁→] [⌕] [⟳] [⚙]
 ```
 
-`📁→` (`folder-input.svg`, lucide) opens the go-to row. `⌕` (`search.svg`) opens the modal. The find row has no button.
+`📁→` (`folder-input.svg`) opens the go-to row. `⌕` (`search.svg`) opens the popup. The find row has no button.
 
 One slot under the header shows `this.row`: `null`, `"find"` or `"goto"`. Opening one closes the other. The slot is hidden while the file viewer is shown.
 
@@ -198,10 +179,9 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"`. Openin
 - Opens with `cmd-f` while the panel has focus. The panel root has `track_focus(this.treeFocus)`, the tree takes focus on mouse-down, and the root's `on_key_down` catches `cmd-f`. Clicking the tree therefore takes the keyboard from the terminal until the terminal is clicked again.
 - Matches: case-insensitive substring of the row name, over `this.visible()`, skipping note rows. Collapsed folders have no entries, so visible rows are all loaded rows.
 - The cursor is `lastOpened`. A query change jumps to the first match. ⏎ and ↓ go to the next match, ⇧⏎ and ↑ to the previous one, wrapping. Each jump calls `scrollToRow`.
-- The counter is the cursor's place among the matches, `0/m` when the cursor is not a match, in `t.ansi1` when there is none. A refresh recomputes the matches.
-- Other matches: matched text on `t.selection`. Current match: matched text in `t.accent` on `t.accent_foreground`.
+- The counter is the cursor's place among the matches, `0/m` when the cursor is not a match, in `t.ansi1` when there is none.
+- Other matches: matched text on `t.selection`. Current match: matched text on `t.accent` in `t.accent_foreground`.
 - ⏎ selects and scrolls; it does not open. Esc closes the row and keeps the selection. The query stays for the next `cmd-f`.
-- `findMatches(rows, q)` and `stepMatch(matches, current, dir)` live in `lib/tree.js`.
 
 ### Go-to row
 
@@ -210,20 +190,21 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"`. Openin
 ```
 
 - Opens from `📁→`, filled with the shown root, or from the pane menu, filled with that pane's folder. The input has focus.
-- Accepts an absolute path, `~/…`, or a path relative to the shown root. ⏎ runs `exec("test", ["-d", abs], { on })` on the panel's machine.
+- Accepts an absolute path, `~/…` (this computer's home), or a path relative to the shown root. ⏎ runs `exec("test", ["-d", abs], { on })` on the panel's machine.
 - Success: `navigate(abs, cx)` and the row closes. ⌂ becomes active, because the root is no longer the terminal's folder.
 - Failure: "Not a folder: <path>" in `t.ansi1` inside the row; the row stays open.
 
 ### Pane menu (`my-menu`)
 
-`items()` case `"pane"` gets "Go to Folder in Files…" for terminal panes, before "Close pane". It runs `layout.show` for the Files panel, then `run("my-filer-pro.goto-row", { machine, cwd })`. The panel's `nextCommand` opens the go-to row filled with `cwd`. When `run` cannot pass arguments to a mod command, the item writes `setShared("filer-pro.goto-row", { id, machine, cwd })` and the panel polls it, as it does for `filer-pro.goto`.
+`items()` case `"pane"` gets "Go to Folder in Files…" for terminal panes with a known folder. It writes `setShared("filer-pro.goto-row", { id, machine, cwd })` and runs `my-filer-pro.show`. Mod commands carry no arguments, so the folder travels in the shared key. The always-shown button copy of `my-filer-pro` answers `show` by showing the Files panel (`showSteps`). The panel picks the shared key up in `render` (`pollGotoRow`) and opens the go-to row filled with `cwd`.
 
 ## Errors
 
 | Failure | Result |
 |---|---|
-| Listing fails (no tool, timeout, permission) | The modal shows the error with Retry; a cached list stays |
-| Listing cut at 7 MiB | "Listed first N files"; ranking works on what was listed |
+| Listing fails (cannot enter the root, timeout) | The popup shows the error with Retry |
+| Listing cut at 7 MiB | "Listed the first N files"; search works on what was listed |
+| Search fails | The popup shows the error with Retry |
 | Pick outside the root or on another machine | Toast "Outside <root>"; nothing opens |
 | Pick beyond the list limits | File opens; toast "Beyond the list limit, not shown in the tree" |
 | Unsaved edits in the viewer | `requestLeave` asks first |
@@ -232,21 +213,22 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"`. Openin
 
 ## Testing
 
-Pure code is checked with `node` assert scripts in `mods/my-filer-pro/test/`, run as `node test/<name>.mjs`:
+Pure code is checked with `node` assert scripts in `mods/my-filer-pro/test/`, run as `node test/<name>.test.mjs`:
 
-- `finder.test.mjs`: `index.vue` ranks above `src/vue/index.js` for `vue`; a file-name prefix ranks above a path hit; `msg/index` matches through the path; highlight ranges; the `:120:5` suffix; a narrowed query returns the same results as a fresh one.
-- `findrow.test.mjs`: `findMatches`; `stepMatch` forward, backward, wrapping, and from no current match.
-- `gotopath.test.mjs`: `~/x`, `../x`, `/abs` and a path relative to the root.
+- `fuzzy.test.mjs`: ranking order, path queries, multi-word queries, highlight ranges.
+- `finder.test.mjs`: the line suffix, the fzf query and grep pattern, ranking with groups and hidden files, the recent list, both shell scripts on a real temporary folder, the cache, `stepRow`.
+- `treefind.test.mjs`: `findMatches`, `stepMatch`, `matchCount`, `ancestorsOf`, `matchRange`, `resolveGoto`.
+- `panels.test.mjs`: `showSteps` for a stack and a column.
 
-Checks in a running Herdr:
+`herdr-app check ~/.config/herdr-app/mods/my-filer-pro` and `herdr-app check ~/.config/herdr-app/mods/my-menu` must pass. Checks in a running Herdr:
 
-1. Whether module state is shared between the overlay copy and the panel copy. If not, the panel owns the list cache and the modal asks it through a shared key.
-2. `openOverlay` with `at: "top"`.
-3. `run("my-filer-pro.goto-row", args)` delivering its arguments.
-4. ↑ and ↓ reaching the modal's `on_key_down` through `Input`.
-5. `cmd-f` reaching the panel's `on_key_down`.
-6. `finder-bench` on `~/Repo` against the 80 ms threshold.
+1. `mod.open:my-filer-pro` opens the popup at the top with `props().overlay` set.
+2. ↑ and ↓ reach the popup's `on_key_down` through `Input`.
+3. `cmd-f` reaches the panel's `on_key_down`.
+4. `run("my-filer-pro.show")` reaches the button copy.
+5. Typing in the popup over `~/Repo` feels immediate.
+6. The pane menu still fits its popup with one more item.
 
 ## Docs
 
-The README's Keys line lists `my-filer-pro.find` (for example `cmd-k`). The repository ships no `keys.json`.
+The README's Keys line lists `mod.open:my-filer-pro` (for example `cmd-k`) and `fzf` as recommended. The repository ships no `keys.json`.
