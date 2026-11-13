@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec, hc, notify } from "herdr";
+import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec, hc, notify, setShared } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s) {
@@ -66,6 +66,7 @@ function items(p, git) {
       // A terminal shown outside a tab (a layout terminal block, a window) has
       // no pane to split, zoom or close: its pane is the block's id.
       const inTab = panes().some((pane) => pane.pane === tg.pane);
+      const cwd = panes().find((pane) => pane.pane === tg.pane)?.cwd;
       return [
         ...(inTab
           ? [
@@ -82,6 +83,7 @@ function items(p, git) {
             ]
           : []),
         ...(parent ? [[`Send back to ${parent.name || parent.address}`, "terminal.park", { terminal: term.address }]] : []),
+        ...(term && cwd ? [["Go to Folder in Files…", "files-goto", { machine: term.address.includes("/") ? term.address.split("/")[0] : null, cwd }]] : []),
         ...(inTab && (term || tg.mod) ? [["Move to…", "move-menu", tg]] : []),
         ...(inTab ? [["Close pane", "pane.close", { pane: tg.pane }]] : []),
       ];
@@ -181,6 +183,12 @@ export default class Menu extends View {
       const n = items({ tab: "move", target: it[2] }).length;
       openOverlay({ mod: "my-menu", kind: "popup", width: 280, height: Math.min(31 * n + 12, 420), props: { tab: "move", target: it[2] } });
     } else if (it[1] === "worktree") openOverlay({ mod: "my-worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
+    // Files opens its go-to row with this folder (my-filer-pro pollGotoRow); mod commands carry no arguments, so the
+    // folder goes through shared state and the command only puts the panel on screen.
+    else if (it[1] === "files-goto") {
+      setShared("filer-pro.goto-row", { id: Math.random().toString(36).slice(2, 10), machine: it[2].machine, cwd: it[2].cwd, at: Date.now() });
+      run("my-filer-pro.show");
+    }
     else run(it[1], it[2]);
   }
 
