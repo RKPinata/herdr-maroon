@@ -2022,6 +2022,8 @@ export default class FilerPro extends View {
       this.navButton("files-top", "slash", `Go to ${nav.top ?? "/"}`, t, nav.up ? (cx) => this.navigate(nav.top, cx) : null),
       this.navButton("files-back-terminal", "folder-tree", "Back to the terminal's folder", t, nav.away ? (cx) => this.navigate(nav.here, cx) : null),
       this.navButton("files-up", "corner-left-up", "Up one level", t, nav.up ? (cx) => this.navigate(nav.up, cx) : null),
+      this.navButton("files-goto", "folder-input", "Go to folder…", t, this.root ? (cx) => this.openRow("goto", null, cx) : null),
+      this.navButton("files-quick-open", "search", "Go to file (⌘K)", t, () => run("mod.open", { name: "my-filer-pro" })),
     ];
   }
 
@@ -2031,6 +2033,76 @@ export default class FilerPro extends View {
     const here = location().cwd, pane = paneId(focused());
     const away = Boolean(pane && this.nav?.has(pane) && this.root && here && this.root !== here);
     return { root: this.root, up: pane ? upOf(this.root) : null, top: topOf(this.root), here, away };
+  }
+
+  // The row under the header: "find" (cmd-f) or "goto" (the folder button, my-menu's Go to Folder in Files). value:
+  // the go-to row's text (default: the shown root).
+  openRow(kind, value, cx) {
+    this.row = kind;
+    if (kind === "find") { this.findInput.focus(); if (this.findQuery) this.findStep(0, cx); }
+    else { this.gotoError = null; this.gotoInput.set_value(value ?? this.root ?? ""); this.gotoInput.focus(); }
+    cx.notify();
+  }
+
+  closeRow(cx) {
+    this.row = null;
+    this.treeFocus.focus();
+    cx.notify();
+  }
+
+  // Moves the selection (lastOpened) to the next (1) or previous (-1) row whose name contains the find query, or
+  // to the first one (0, a query change), and scrolls to it.
+  findStep(dir, cx) {
+    const matches = findMatches(this.visible(), this.findQuery);
+    const next = dir === 0 ? matches[0] ?? null : stepMatch(matches, this.lastOpened, dir);
+    if (next) { this.lastOpened = next; this.scrollToRow(next); }
+    cx.notify();
+  }
+
+  // The go-to row's Enter: the folder must exist on the panel's machine; then it becomes the shown root.
+  // shortcut: "~" is this computer's home also on a machine; type an absolute path there.
+  submitGoto(cx) {
+    const abs = resolveGoto(this.gotoInput.value(), this.root ?? home(), home());
+    if (!abs) return;
+    const on = this.on;
+    cx.spawn(async (cx) => {
+      const r = await exec("test", ["-d", abs], { on }).catch(() => null);
+      if (r?.code !== 0) { this.gotoError = `Not a folder: ${abs}`; cx.notify(); return; }
+      if (on !== this.on) return;
+      this.row = null;
+      this.navigate(abs, cx);
+      cx.notify();
+    });
+  }
+
+  // my-menu's Go to Folder in Files (shared filer-pro.goto-row = { id, machine, cwd }): opens the go-to row with that
+  // folder, once, in the panel that shows the same machine. Called from render, so it runs in a task.
+  pollGotoRow(cx) {
+    const r = shared("filer-pro.goto-row");
+    if (!r?.id || r.id === this.gotoRowSeen) return;
+    this.gotoRowSeen = r.id;
+    if ((r.machine ?? null) !== (this.on ?? null)) return;
+    cx.spawn(async (cx) => this.openRow("goto", r.cwd, cx));
+  }
+
+  rowSlot(t) {
+    if (this.row === "find") {
+      const matches = findMatches(this.visible(), this.findQuery);
+      return findRow(t, { input: this.findInput, count: this.findQuery.trim() ? matchCount(matches, this.lastOpened) : "", none: Boolean(this.findQuery.trim()) && !matches.length },
+        { onStep: (dir, cx) => this.findStep(dir, cx), onClose: (cx) => this.closeRow(cx) });
+    }
+    return gotoRow(t, { input: this.gotoInput, error: this.gotoError }, { onGo: (cx) => this.submitGoto(cx), onClose: (cx) => this.closeRow(cx) });
+  }
+
+  // A row's name; while the find row is open, the matched part is marked (the current match in the accent).
+  nameCell(name, path, t) {
+    const range = this.row === "find" ? matchRange(name, this.findQuery) : null;
+    if (!range) return div().flex_1().min_w(0).truncate().child(name);
+    const current = path === this.lastOpened;
+    return h_flex().flex_1().min_w(0).overflow_hidden()
+      .child(div().flex_none().child(name.slice(0, range[0])))
+      .child(div().flex_none().rounded(3).bg(current ? t.accent : t.selection).text_color(current ? t.accent_foreground : t.foreground).child(name.slice(range[0], range[1])))
+      .child(div().min_w(0).truncate().child(name.slice(range[1])));
   }
 
   // An icon button of the header's navigation (Up, Go to /) in the refresh button's style; without onClick dimmed.
@@ -2177,7 +2249,7 @@ export default class FilerPro extends View {
         .on_drop((e, cx) => this.drop(e.paths, path, dir))
         .child(dir ? svg(`${BASE}/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
         .child(image(bundle && !dir ? bundleIcon(entry.name, dark) : icon(path, entry.dir, open, dark)).size(16).flex_none())
-        .child(div().flex_1().min_w(0).truncate().child(entry.name))
+        .child(this.nameCell(entry.name, path, t))
         .when(Boolean(sizes), el => el.child(this.sizeCell(path, entry, sizes, font, t)))
         .when(Boolean(mark) || Boolean(sizes), el => el.child(div().text_size(11).when(Boolean(sizes), m => m.w(12).flex_none().flex().justify_center()).text_color(mark === "A" ? t.ansi2 : mark === "D" || mark === "U" ? t.ansi1 : t.blocked).child(mark ?? "")));
     });
@@ -2219,6 +2291,7 @@ export default class FilerPro extends View {
     this.pollPackage(cx);
     this.pollGoto(cx);
     this.pollPick(cx);
+    this.pollGotoRow(cx);
     this.revealPending(cx);
     const t = theme(), dark = Boolean(settings().dark);
     if (this.doc?.diagrams && this.previewer && this.colorKey !== this.previewer.colorKey(t)) this.renderDiagrams(cx);
@@ -2226,6 +2299,8 @@ export default class FilerPro extends View {
     const update = this.conf.update_check ? updateHint(shared("filer-pro.update"), this.version) : null;
     const bar = transfersBar(shared("filer-pro.jobs"), t, { onCancel: (id) => this.jobs.cancel(id).catch(() => {}), onDismiss: (id) => this.jobs.dismiss(id) });
     const root = v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+      .track_focus(this.treeFocus)
+      .on_key_down((e, cx) => { if (e.key === "f" && e.modifiers.platform && !this.file) { this.openRow("find", null, cx); cx.stop_propagation(); } })
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(boxy(t, "files-back", "←", { h: 20, px: 5, size: 13, onClick: (_e, cx) => this.requestLeave((cx) => { this.show(null); cx.notify(); }, cx) })))
         .child(div().flex_none().font_semibold().child("Files"))
@@ -2238,9 +2313,11 @@ export default class FilerPro extends View {
         .children(this.editTools(t))
         .when(Boolean(this.file) && Boolean(this.full), el => el.child(boxy(t, "files-full", svg(`${BASE}/maximize.svg`).size(13), { h: 20, px: 5, disabled: true }).tooltip("Open in full screen")))
         .when(Boolean(this.file) && !this.full, el => el.child(boxy(t, "files-full", svg(`${BASE}/maximize.svg`).size(13), { h: 20, px: 5, onClick: (_e, cx) => this.openFull(cx) }))))
+      .when(Boolean(this.row) && !this.file, el => el.child(this.rowSlot(t)))
       // The tree stays mounted while a file is open, at zero height with a spacer of the same content height:
       // GPUI keeps a scroll offset only for elements rendered every frame (issue #5).
       .child(v_flex().id("files-tree").min_h(0).overflow_y_scrollbar().track_scroll(this.treeScroll)
+        .on_mouse_down("left", () => this.treeFocus.focus())
         .when(!this.file, el => el.flex_1().p(TREE_PAD).children(this.rows(t, dark)))
         .when(Boolean(this.file), el => el.flex_none().h(0).p(0).child(div().flex_none().h(this.visible().length * ROW_H + 2 * TREE_PAD)))
         .on_drop((e, cx) => this.drop(e.paths, null, false))
