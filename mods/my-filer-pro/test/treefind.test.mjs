@@ -50,6 +50,9 @@ assert.deepEqual(filterFolders(names, "c"), ["core", "src", "Resources", "docs"]
 assert.deepEqual(filterFolders(names, "."), [".git", ".cache"]);
 assert.deepEqual(filterFolders(names, ".c"), [".cache"]);
 assert.deepEqual(filterFolders(names, "", 2), ["src", "Resources"]);
+const twenty = Array.from({ length: 20 }, (_, i) => `d${i}`);
+assert.deepEqual(filterFolders(twenty, ""), twenty);
+assert.equal(filterFolders(Array.from({ length: 300 }, (_, i) => `d${i}`), "").length, 200);
 
 assert.equal(applyCompletion("~/Re", "Repo"), "~/Repo/");
 assert.equal(applyCompletion("/a/b/", "c d"), "/a/b/c d/");

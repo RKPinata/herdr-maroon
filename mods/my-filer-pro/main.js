@@ -1,6 +1,6 @@
 // A lazy file browser for the focused pane's folder, with bounded read-only previews.
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState, ScrollHandle, InputState } from "gpui-base";
+import { v_flex, h_flex, Editor, EditorState, ScrollHandle, VirtualListScrollHandle, InputState } from "gpui-base";
 import { spaces, panes, terminals, focused, exec, hc, readTextFile, writeTextFile, watchFolder, theme, settings, window, shared, setShared, notify, props, appHome, home, nextCommand, openOverlay, closeOverlay, pickFolder, run, layout } from "herdr";
 import * as fs from "fs/promises";
 import { createJobs } from "./lib/jobs.js";
@@ -210,6 +210,7 @@ export default class FilerPro extends View {
     this.pickSeen = done(shared("filer-pro.pick")) ? shared("filer-pro.pick")?.id ?? null : null;
     this.gotoRowSeen = done(shared("filer-pro.goto-row")) ? shared("filer-pro.goto-row")?.id ?? null : null;
     this.treeScroll = ScrollHandle.new();
+    this.gotoScroll = VirtualListScrollHandle.new();
     this.treeFocus = cx.focus_handle();
     this.row = null; this.findQuery = ""; this.gotoError = null;
     this.findInput = InputState.new({ placeholder: "Find in tree" });
@@ -719,7 +720,7 @@ export default class FilerPro extends View {
       if (props().full) { this.fullState = "closed"; setShared("filer-pro.fullscreen", { id: props().full, state: "closed", at: Date.now(), saved: this.bigSaved?.path === this.file ? this.bigSaved : null }); }
       this.code?.release(); this.code = null; this.file = null; this.doc = null; this.loader = null; return;
     }
-    if (!props()?.view) { for (const h of [this.treeScroll, this.findInput, this.gotoInput]) h?.release?.(); return; }
+    if (!props()?.view) { for (const h of [this.treeScroll, this.findInput, this.gotoInput, this.gotoScroll]) h?.release?.(); return; }
     if (props()?.view !== "conflict") return;
     const a = closeAnswer(this.batchId, shared("filer-pro.pending"), shared("filer-pro.answer"));
     if (a) setShared("filer-pro.answer", a);
@@ -2108,6 +2109,7 @@ export default class FilerPro extends View {
       }
       const items = base ? filterFolders(names, base.prefix) : [];
       this.gotoSuggest = items.length ? { items, at: 0, moved: false, prefix: base.prefix } : null;
+      if (items.length) this.gotoScroll.scroll_to_item(0);
       cx.notify();
     });
   }
@@ -2119,7 +2121,7 @@ export default class FilerPro extends View {
     if (!s) return false;
     const step = { down: 1, "ctrl-n": 1, up: -1, "ctrl-p": -1 }[k];
     if (k === "tab") this.pickSuggest(s.items[s.at], cx);
-    else if (step) { this.gotoSuggest = { ...s, at: (s.at + step + s.items.length) % s.items.length, moved: true }; cx.notify(); }
+    else if (step) { this.gotoSuggest = { ...s, at: (s.at + step + s.items.length) % s.items.length, moved: true }; this.gotoScroll.scroll_to_item(this.gotoSuggest.at); cx.notify(); }
     else if (k === "escape") { this.gotoSeq++; this.gotoSuggest = null; cx.notify(); }
     else return false;
     return true;
@@ -2198,9 +2200,9 @@ export default class FilerPro extends View {
         { onStep: (dir, cx) => this.findStep(dir, cx), onClose: (cx) => this.closeRow(cx) });
     }
     const target = this.gotoTarget = { ...this.gotoTarget, ...this.terminalInfo(this.gotoTarget.terminal) };
-    return moveRow(t, { input: this.gotoInput, target, error: this.gotoError, suggest: this.gotoSuggest, prefix: this.gotoSuggest?.prefix ?? "", width: this.gotoWidth },
+    return moveRow(t, { input: this.gotoInput, target, error: this.gotoError, suggest: this.gotoSuggest, prefix: this.gotoSuggest?.prefix ?? "", width: this.gotoWidth, scroll: this.gotoScroll },
       { onGo: (cx) => this.submitGoto(cx), onClose: (cx) => this.closeRow(cx), onKey: (e, cx) => this.moveKey(e, cx), onPick: (name, cx) => this.pickSuggest(name, cx),
-        onWidth: (px, cx) => { if (px !== this.gotoWidth) { this.gotoWidth = px; cx.notify(); } } });
+        onWidth: (px, cx) => { const w = px / (settings().zoom ?? 1); if (w !== this.gotoWidth) { this.gotoWidth = w; cx.notify(); } } });
   }
 
   // A row's name; while the find row is open, the matched part is marked (the current match in the accent).

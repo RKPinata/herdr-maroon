@@ -59,9 +59,9 @@ export function completionBase(text, root, home) {
   return dir && { dir, prefix: text.slice(cut) };
 }
 
-// At most max folder names for the typed prefix, ignoring case: names starting with it, then names containing it.
+// At most max (default 200) folder names for the typed prefix, ignoring case: names starting with it, then names containing it.
 // Dot names only when the prefix starts with ".".
-export function filterFolders(names, prefix, max = 8) {
+export function filterFolders(names, prefix, max = 200) {
   const p = prefix.toLowerCase(), shown = names.filter((n) => prefix.startsWith(".") || !n.startsWith("."));
   const starts = shown.filter((n) => n.toLowerCase().startsWith(p));
   return [...starts, ...shown.filter((n) => !starts.includes(n) && n.toLowerCase().includes(p))].slice(0, max);
