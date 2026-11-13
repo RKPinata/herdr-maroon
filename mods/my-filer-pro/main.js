@@ -2064,7 +2064,8 @@ export default class FilerPro extends View {
   }
 
   // The row under the header: "find" (cmd-f) or "goto", the move-terminal row (the header button, my-menu's Move Terminal to
-  // Folder). value: the move row's text (default: the shown root); terminal: the one it moves (default: the focused one).
+  // Folder). value: the move row's folder (default: the shown root), filled in with a trailing "/" so the dropdown lists
+  // its subfolders; terminal: the one it moves (default: the focused one).
   openRow(kind, value, cx, terminal = focused()?.terminal) {
     if (kind === "goto" && !terminal) return;
     const opening = this.row !== kind;
@@ -2073,19 +2074,93 @@ export default class FilerPro extends View {
     else {
       this.gotoError = null; this.gotoSuggest = null; this.gotoCache = new Map();
       this.gotoTarget = { terminal, on: terminal.includes("/") ? terminal.split("/")[0] : null, ...this.terminalInfo(terminal) };
-      this.gotoInput.set_value(value ?? this.root ?? ""); this.gotoInput.focus(); this.suggest(cx);
+      const folder = value ?? this.root ?? "";
+      this.gotoInput.set_value(folder && !folder.endsWith("/") ? `${folder}/` : folder); this.gotoInput.focus(); this.suggest(cx);
     }
     cx.notify();
   }
 
-  // A terminal's display name, whether it is at a shell prompt, and the program's name.
+  // A terminal's display name, whether it is at a shell prompt, and the program's name (else its command's first word).
   terminalInfo(address) {
-    const program = (panes().find((p) => p.terminal === address) ?? terminals().find((x) => x.address === address))?.program;
-    return { name: terminals().find((x) => x.address === address)?.name || address, shell: program?.shell === true, program: program?.name ?? "another program" };
+    const term = terminals().find((x) => x.address === address);
+    const program = (panes().find((p) => p.terminal === address) ?? term)?.program;
+    const command = [term?.argv ?? []].flat()[0]?.split(" ")[0].split("/").pop();
+    return { name: term?.name || address, shell: program?.shell === true, program: program?.name || command || "another program" };
+  }
+
+  // The move row's folder dropdown for the typed text: 80 ms after the last change, the folder being typed is listed on
+  // the terminal's machine (once per machine and folder while the row is open) and filtered by the typed name.
+  // A newer change or a closed row drops the reply; an empty list or a failed listing shows no dropdown.
+  suggest(cx) {
+    const seq = ++this.gotoSeq, text = this.gotoInput.value();
+    const live = () => seq === this.gotoSeq && this.row === "goto";
+    cx.spawn(async (cx) => {
+      await cx.sleep(80);
+      if (!live()) return;
+      const base = completionBase(text, this.root ?? home(), home()), on = this.gotoTarget?.on ?? null;
+      const key = `${on}\0${base?.dir}`;
+      let names = base ? this.gotoCache.get(key) : [];
+      if (!names) {
+        const r = await exec("sh", ["-c", LIST_FOLDERS, "dirs", base.dir], { on, timeout: 5000 }).catch(() => null);
+        names = r?.code === 0 ? r.stdout.split("\n").filter(Boolean) : [];
+        if (r) this.gotoCache.set(key, names);
+        if (!live()) return;
+      }
+      const items = base ? filterFolders(names, base.prefix) : [];
+      this.gotoSuggest = items.length ? { items, at: 0, moved: false, prefix: base.prefix } : null;
+      cx.notify();
+    });
+  }
+
+  // The move row's keys while the dropdown shows. Tab takes the highlighted folder; ↓ ↑ (also ctrl-n, ctrl-p) move the
+  // highlight, wrapping; Esc hides the dropdown (a second Esc closes the row). true when it took the key.
+  moveKey(e, cx) {
+    const s = this.gotoSuggest, k = e.keystroke;
+    if (!s) return false;
+    const step = { down: 1, "ctrl-n": 1, up: -1, "ctrl-p": -1 }[k];
+    if (k === "tab") this.pickSuggest(s.items[s.at], cx);
+    else if (step) { this.gotoSuggest = { ...s, at: (s.at + step + s.items.length) % s.items.length, moved: true }; cx.notify(); }
+    else if (k === "escape") { this.gotoSeq++; this.gotoSuggest = null; cx.notify(); }
+    else return false;
+    return true;
+  }
+
+  // Puts a dropdown folder into the move row's text, keeps the keyboard there and lists the folders inside it.
+  pickSuggest(name, cx) {
+    this.gotoInput.set_value(applyCompletion(this.gotoInput.value(), name));
+    this.gotoInput.focus();
+    if (this.gotoSuggest) this.gotoSuggest = { ...this.gotoSuggest, moved: false };
+    this.suggest(cx);
+    cx.notify();
+  }
+
+  // The move row's Enter and button. After ↓ or ↑, Enter takes the highlighted folder instead. Else the folder must exist
+  // on the terminal's machine and the terminal must still be at a shell prompt; then it gets `cd '<abs>'`, Files shows
+  // the folder and the row closes. A reply is dropped when the row, its terminal or the text changed meanwhile.
+  // shortcut: "~" is this computer's home also on a machine; type an absolute path there.
+  submitGoto(cx) {
+    const s = this.gotoSuggest;
+    if (s?.moved) return this.pickSuggest(s.items[s.at], cx);
+    const asked = this.gotoInput.value(), target = this.gotoTarget;
+    const abs = resolveGoto(asked, this.root ?? home(), home());
+    if (!abs || !target) return;
+    const same = () => this.row === "goto" && this.gotoTarget?.terminal === target.terminal && this.gotoInput.value() === asked;
+    cx.spawn(async (cx) => {
+      const r = await exec("test", ["-d", abs], { on: target.on, timeout: 10000 }).catch(() => null);
+      if (!same()) return;
+      if (!r) { this.gotoError = `Cannot reach ${target.on ?? "this computer"}`; cx.notify(); return; }
+      if (r.code !== 0) { this.gotoError = `Not a folder: ${abs}`; cx.notify(); return; }
+      // Not at a prompt any more: render shows the not-a-shell line.
+      if (!this.terminalInfo(target.terminal).shell) { cx.notify(); return; }
+      const sent = await hc(["send", target.terminal, `cd ${shellQuote(abs)}`]).catch((e) => ({ code: -1, stderr: String(e?.message ?? e) }));
+      if (sent.code !== 0) { if (same()) { this.gotoError = sent.stderr.trim() || "The terminal did not take the command"; cx.notify(); } return; }
+      this.navigate(abs, cx);
+      if (this.row === "goto") this.closeRow(cx);
+    });
   }
 
   closeRow(cx) {
-    this.row = null;
+    this.row = null; this.gotoSuggest = null; this.gotoSeq++;
     this.treeFocus.focus();
     cx.notify();
   }
@@ -2123,8 +2198,9 @@ export default class FilerPro extends View {
         { onStep: (dir, cx) => this.findStep(dir, cx), onClose: (cx) => this.closeRow(cx) });
     }
     const target = this.gotoTarget = { ...this.gotoTarget, ...this.terminalInfo(this.gotoTarget.terminal) };
-    return moveRow(t, { input: this.gotoInput, target, error: this.gotoError, suggest: this.gotoSuggest, prefix: this.gotoSuggest?.prefix ?? "" },
-      { onGo: (cx) => this.submitGoto(cx), onClose: (cx) => this.closeRow(cx), onKey: (e, cx) => this.moveKey(e, cx), onPick: (name, cx) => this.pickSuggest(name, cx) });
+    return moveRow(t, { input: this.gotoInput, target, error: this.gotoError, suggest: this.gotoSuggest, prefix: this.gotoSuggest?.prefix ?? "", width: this.gotoWidth },
+      { onGo: (cx) => this.submitGoto(cx), onClose: (cx) => this.closeRow(cx), onKey: (e, cx) => this.moveKey(e, cx), onPick: (name, cx) => this.pickSuggest(name, cx),
+        onWidth: (px, cx) => { if (px !== this.gotoWidth) { this.gotoWidth = px; cx.notify(); } } });
   }
 
   // A row's name; while the find row is open, the matched part is marked (the current match in the accent).

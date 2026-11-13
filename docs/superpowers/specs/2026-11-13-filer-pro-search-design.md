@@ -192,26 +192,30 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"` (the mo
 ### Move-terminal row
 
 ```
-[>_ cd · zsh]  [~/Repo/claude-obsidian▍]  [Move terminal] [✕]
-  📁 claude-obsidian
-  📁 claude-code
+>_ Move terminal t3g to                              [✕]
+[/Users/danish/Repo/▍                  ] [Move terminal]
+┌───────────────────────────────────────┐
+│ 📁 Faah                               │   floats over the tree
+│ 📁 TongTong                           │
+└───────────────────────────────────────┘
+t3g is running Claude Code: nothing will be typed        (t.ansi1)
 ```
 
-- Acts on one terminal, `this.gotoTarget = { terminal, on, name, shell, program }`: the focused terminal when the row opens from the header button, the right-clicked pane's terminal when it opens from the pane menu. `shell` and `program` come from that terminal's `program` (`program.shell`, `program.name`) and are read again on every render.
-- The chip shows the terminal icon and `cd · <terminal name or address>`. The input opens filled with the shown root (from the pane menu: that pane's folder) and has focus. The primary button is "Move terminal".
-- A terminal that is not at a shell prompt disables the button and puts `<name> is running <program>: nothing will be typed` in `t.ansi1` under the row. Errors use the same line.
-- Accepts an absolute path, `~/…` (this computer's home), or a path relative to the shown root. ⏎ or the button runs `exec("test", ["-d", abs], { on })` on the terminal's machine, then checks that the terminal is still at a shell prompt, then runs `hc send <terminal> "cd '<abs>'"` (the path single-quoted, a `'` inside as `'\''`).
+- Acts on one terminal, `this.gotoTarget = { terminal, on, name, shell, program }`: the focused terminal when the row opens from the header button, the right-clicked pane's terminal when it opens from the pane menu. `shell` and `program` come from that terminal's `program` (`program.shell`, `program.name`, else the first word of its `argv` from `terminals()`, else "another program") and are read again on every render.
+- Line 1: the `square-terminal` icon, "Move terminal <terminal name or address> to" (the name semibold) and ✕ at the right. Line 2: the input at full width, then the primary button "Move terminal". Line 3, when needed: the message in `t.ansi1`.
+- The input opens with focus, filled with the shown root (from the pane menu: that pane's folder) and a trailing "/", so the dropdown lists that folder's subfolders at once.
+- A terminal that is not at a shell prompt disables the button, and line 3 says `<name> is running <program>: nothing will be typed`.
+- Accepts an absolute path, `~/…` (this computer's home), or a path relative to the shown root. ⏎ or the button runs `exec("test", ["-d", abs], { on })` on the terminal's machine (10 s timeout), then checks that the terminal is still at a shell prompt, then runs `hc send <terminal> "cd '<abs>'"` (the path single-quoted, a `'` inside as `'\''`).
 - Success: `navigate(abs, cx)` shows the folder in Files at once, and `closeRow` gives focus back to the panel. The terminal's own folder reaches it a moment later, which ends the override.
-- Failure: the message in `t.ansi1`, and the row stays open: "Not a folder: <path>", "Cannot reach <machine or this computer>" when `exec` rejects, `hc`'s stderr when `send` fails, or the not-a-shell line.
+- Failure: the message on line 3, and the row stays open: "Not a folder: <path>", "Cannot reach <machine or this computer>" when `exec` rejects, `hc`'s stderr when `send` fails, or the not-a-shell line.
 - A reply is dropped when the open row, its terminal or the input text changed since Enter.
-- The `exec` call has a 10 s timeout.
 
-Folder completion:
+Folder dropdown:
 
 - `completionBase(text, root, home)` gives `{ dir, prefix }`: for text ending in "/" the resolved text and an empty prefix, else the resolved parent and the last segment. `filterFolders(names, prefix, max = 8)` keeps names that start with the prefix, then names that contain it, ignoring case; dot names only when the prefix starts with ".". `applyCompletion(text, name)` replaces the last segment with `name + "/"`.
-- 80 ms after the last input change (a sequence number drops older waits), the panel lists `dir` with `sh -c` on the terminal's machine (5 s timeout) and stores `this.gotoSuggest = { items, at, prefix }`. Listings are cached per machine and folder while the row is open.
-- The suggestions are 30 px rows under the input, each with a folder icon and the typed part of the name in semibold. The highlighted row is drawn with `card()`.
-- Tab takes the highlighted suggestion, ↑ and ↓ move the highlight, Esc closes the row, ⏎ runs the move on the typed text. A click on a suggestion takes it. Taking a suggestion keeps focus in the input and lists the folders inside it.
+- `suggest(cx)` runs 80 ms after the last input change (`this.gotoSeq` drops older waits and stale replies). It lists `dir` with `sh -c` on the terminal's machine (5 s timeout) and stores `this.gotoSuggest = { items, at, moved, prefix }`. Listings are cached per machine and folder in `this.gotoCache` while the row is open. An empty list or a failed listing shows no dropdown.
+- The dropdown is the content of a `Popup` whose trigger is the input, anchored `top_left`: it paints in the window's top layer, under the input and over the tree, at the input's measured width. It covers line 3 while it shows. Rows are 28 px: a folder icon and the name with the typed part semibold; the highlighted row is drawn with `card()`.
+- Keys while it shows: Tab takes the highlighted folder; ↓ ↑ (also ctrl-n, ctrl-p) move the highlight, wrapping; Esc hides the dropdown, a second Esc closes the row; ⏎ takes the highlighted folder after ↓ or ↑, else runs the move on the typed text. A click on a folder takes it. Taking a folder keeps focus in the input and lists the folders inside it.
 
 ### Pane menu (`my-menu`)
 

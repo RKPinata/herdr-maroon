@@ -1,6 +1,6 @@
 // The row under the Files header: the find row (cmd-f) or the move-terminal row (the header button, the pane menu).
 import { div, svg } from "gpui-kit";
-import { h_flex, v_flex, Input } from "gpui-base";
+import { h_flex, v_flex, Input, Popup } from "gpui-base";
 import { boxy, card } from "../boxy.js";
 import { matchRange } from "../lib/treefind.js";
 import { BASE } from "../lib/icons.js";
@@ -29,40 +29,46 @@ export function findRow(t, state, handlers) {
     .child(iconButton(t, "files-find-close", "x", "Close", (cx) => handlers.onClose(cx)));
 }
 
-// The folders under the move row's input; the highlighted one is a card. The matched part of each name is semibold.
-function suggestions(t, { items, at }, prefix, onPick) {
-  return v_flex().id("files-move-suggest").w_full().gap(2)
+// The folders under the move row's input, floating over the tree at the input's width; the highlighted one is a card.
+// The typed part of each name is semibold.
+function suggestions(t, { items, at }, prefix, width, onPick) {
+  return v_flex().id("files-move-suggest").w(width).mt(4).p(4).gap(2).rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_md()
     .children(items.map((name, i) => {
       const range = matchRange(name, prefix);
       const label = range
         ? h_flex().child(div().child(name.slice(0, range[0]))).child(div().font_semibold().child(name.slice(range[0], range[1]))).child(div().child(name.slice(range[1])))
         : div().child(name);
-      return card(t, h_flex().id(`files-move-suggest-${i}`).flex_none().h(30).px(8).gap(8).items_center().rounded(8).cursor_pointer().text_size(12.5)
+      return card(t, h_flex().id(`files-move-suggest-${i}`).flex_none().h(28).px(8).gap(8).items_center().rounded(8).cursor_pointer().text_size(12.5).text_color(t.foreground)
         .on_click((_e, cx) => onPick(name, cx)), i === at)
         .child(svg(`${BASE}/folder.svg`).size(14).flex_none().text_color(t.foreground))
         .child(div().flex_1().min_w(0).truncate().child(label));
     }));
 }
 
-// The row that types `cd <folder>` into one terminal.
-// state: { input, target: { name, shell, program }, error, suggest: { items, at } | null, prefix (the typed folder name) };
-// handlers: { onGo(cx), onClose(cx), onKey(e, cx) (Tab, up, down; true when it took the key), onPick(name, cx) }
+// The row that types `cd <folder>` into one terminal: what moves where, the input with its folder dropdown and the
+// button, then the message line.
+// state: { input, target: { name, shell, program }, error, suggest: { items, at } | null, prefix (the typed folder name),
+// width (the input's, for the dropdown) };
+// handlers: { onGo(cx), onClose(cx), onKey(e, cx) (true when it took the key), onPick(name, cx), onWidth(px, cx) }
 export function moveRow(t, state, handlers) {
-  const { target } = state;
+  const { target, suggest } = state;
   const note = state.error ?? (target.shell ? null : `${target.name} is running ${target.program}: nothing will be typed`);
-  return v_flex().id("files-move-row").flex_none().min_h(38).px(10).py(6).gap(4).border_b(1).border_color(t.border)
+  const input = field(t, state.input).id("files-move-field").w_full().on_size_change((size, cx) => handlers.onWidth(size.width, cx));
+  return v_flex().id("files-move-row").flex_none().px(10).py(8).gap(6).border_b(1).border_color(t.border).text_color(t.foreground)
     .on_key_down((e, cx) => {
-      if (e.key === "escape") handlers.onClose(cx);
-      else if (!handlers.onKey(e, cx)) return;
-      cx.stop_propagation();
+      if (handlers.onKey(e, cx)) cx.stop_propagation();
+      else if (e.key === "escape") { handlers.onClose(cx); cx.stop_propagation(); }
     })
-    .child(h_flex().w_full().gap(6).items_center()
-      .child(h_flex().id("files-move-chip").flex_none().max_w(160).h(26).px(8).gap(5).items_center().rounded(6).border_1().border_color(t.border).bg(t.raised).text_size(12)
-        .child(svg(`${BASE}/square-terminal.svg`).size(13).flex_none().text_color(t.foreground))
-        .child(div().min_w(0).truncate().child(`cd · ${target.name}`)))
-      .child(field(t, state.input))
-      .child(boxy(t, "files-move-go", "Move terminal", { kind: "primary", h: 20, px: 8, size: 11.5, disabled: !target.shell, onClick: target.shell ? (_e, cx) => handlers.onGo(cx) : undefined }))
+    .child(h_flex().w_full().gap(6).items_center().text_size(12.5)
+      .child(svg(`${BASE}/square-terminal.svg`).size(14).flex_none().text_color(t.foreground))
+      .child(div().flex_none().child("Move terminal"))
+      .child(div().min_w(0).truncate().font_semibold().child(target.name))
+      .child(div().flex_none().child("to"))
+      .child(div().flex_1())
       .child(iconButton(t, "files-move-close", "x", "Close", (cx) => handlers.onClose(cx))))
-    .when(Boolean(note), (el) => el.child(div().w_full().text_size(11.5).text_color(t.ansi1).child(note)))
-    .when(Boolean(state.suggest?.items.length), (el) => el.child(suggestions(t, state.suggest, state.prefix, handlers.onPick)));
+    .child(h_flex().w_full().gap(6).items_center()
+      .child(Popup.new("files-move-popup", input).flex_1().min_w(0).anchor("top_left")
+        .when(Boolean(suggest?.items.length && state.width), (el) => el.content(suggestions(t, suggest, state.prefix, state.width, handlers.onPick))))
+      .child(boxy(t, "files-move-go", "Move terminal", { kind: "primary", h: 22, px: 8, size: 11.5, disabled: !target.shell, onClick: target.shell ? (_e, cx) => handlers.onGo(cx) : undefined })))
+    .when(Boolean(note), (el) => el.child(div().w_full().text_size(11.5).text_color(t.ansi1).child(note)));
 }
