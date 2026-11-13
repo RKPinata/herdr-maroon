@@ -4,6 +4,18 @@ A complete Herdr App setup: one layout, its theme, its keys, and every mod it us
 
 ![Maroon](preview.png)
 
+To install, paste this into a coding agent on the machine that runs Herdr:
+
+```
+Add the Herdr layout at https://github.com/RKPinata/herdr-maroon to my Herdr app.
+Follow "Layouts and mods other people made" in ~/.config/herdr-app/AGENTS.md.
+Read README.md and RECIPE.md first, then:
+- Rename the repo's my-* mods with scripts/rename-prefix.sh if any name clashes with my mods.
+- Merge keys.json and settings.json into mine. Ask before you replace a key or setting I use.
+- Tell me what each mod needs (programs, the Claude Code settings in README.md) and what I am missing.
+- Run herdr-app check on each mod, then switch to the maroon layout.
+```
+
 `RECIPE.md` describes what you see and how to rebuild it from scratch.
 
 ## What is here
