@@ -1,6 +1,6 @@
 // node test/treefind.test.mjs
 import assert from "node:assert/strict";
-import { findMatches, stepMatch, matchCount, ancestorsOf, matchRange, resolveGoto } from "../lib/treefind.js";
+import { findMatches, stepMatch, matchCount, ancestorsOf, matchRange, resolveGoto, completionBase, filterFolders, applyCompletion } from "../lib/treefind.js";
 
 const row = (path, note = false) => ({ path, entry: { name: path.split("/").pop() || "x", note }, depth: 0 });
 const rows = [row("Front"), row("src"), row("src/front.vue"), row("src/back.vue"), row("src/", true)];
@@ -33,5 +33,26 @@ assert.equal(resolveGoto("../x", "/r/a", "/h"), "/r/x");
 assert.equal(resolveGoto("sub/./y", "/r/", "/h"), "/r/sub/y");
 assert.equal(resolveGoto("/..", "/r", "/h"), "/");
 assert.equal(resolveGoto("  ", "/r", "/h"), null);
+
+assert.deepEqual(completionBase("~/Repo/", "/r", "/h"), { dir: "/h/Repo", prefix: "" });
+assert.deepEqual(completionBase("~/Re", "/r", "/h"), { dir: "/h", prefix: "Re" });
+assert.deepEqual(completionBase("/Us", "/r", "/h"), { dir: "/", prefix: "Us" });
+assert.deepEqual(completionBase("sub/x", "/r/", "/h"), { dir: "/r/sub", prefix: "x" });
+assert.deepEqual(completionBase("x", "/r", "/h"), { dir: "/r", prefix: "x" });
+assert.deepEqual(completionBase("../", "/r/a", "/h"), { dir: "/r", prefix: "" });
+assert.equal(completionBase("", "/r", "/h"), null);
+assert.equal(completionBase("~/x", "/r", ""), null);
+
+const names = ["src", ".git", "Resources", "core", "docs", ".cache"];
+assert.deepEqual(filterFolders(names, ""), ["src", "Resources", "core", "docs"]);
+assert.deepEqual(filterFolders(names, "RE"), ["Resources", "core"]);
+assert.deepEqual(filterFolders(names, "c"), ["core", "src", "Resources", "docs"]);
+assert.deepEqual(filterFolders(names, "."), [".git", ".cache"]);
+assert.deepEqual(filterFolders(names, ".c"), [".cache"]);
+assert.deepEqual(filterFolders(names, "", 2), ["src", "Resources"]);
+
+assert.equal(applyCompletion("~/Re", "Repo"), "~/Repo/");
+assert.equal(applyCompletion("/a/b/", "c d"), "/a/b/c d/");
+assert.equal(applyCompletion("x", "xyz"), "xyz/");
 
 console.log("treefind ok");

@@ -1,7 +1,7 @@
 // A lazy file browser for the focused pane's folder, with bounded read-only previews.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, ScrollHandle, InputState } from "gpui-base";
-import { spaces, panes, focused, exec, hc, readTextFile, writeTextFile, watchFolder, theme, settings, window, shared, setShared, notify, props, appHome, home, nextCommand, openOverlay, closeOverlay, pickFolder, run, layout } from "herdr";
+import { spaces, panes, terminals, focused, exec, hc, readTextFile, writeTextFile, watchFolder, theme, settings, window, shared, setShared, notify, props, appHome, home, nextCommand, openOverlay, closeOverlay, pickFolder, run, layout } from "herdr";
 import * as fs from "fs/promises";
 import { createJobs } from "./lib/jobs.js";
 import { leaseNext, staleLegacyKeys } from "./lib/lease.js";
@@ -49,9 +49,9 @@ import { editTools, promptBar, statusBar } from "./ui/edit.js";
 import { createSettingsDialog, settingsView, submitSettings, tilde } from "./ui/settings.js";
 import { boxy } from "./boxy.js";
 import { createFinder } from "./lib/finder.js";
-import { findMatches, stepMatch, matchCount, ancestorsOf, matchRange, resolveGoto } from "./lib/treefind.js";
+import { findMatches, stepMatch, matchCount, ancestorsOf, matchRange, resolveGoto, completionBase, filterFolders, applyCompletion } from "./lib/treefind.js";
 import { createQuickOpen, quickOpenView } from "./ui/quickopen.js";
-import { findRow, gotoRow } from "./ui/treerow.js";
+import { findRow, moveRow } from "./ui/treerow.js";
 
 // The preview lives in ./preview/ and is only ever loaded here, with import(): a deleted or broken folder
 // gives null and files open as plain source. A failure is not remembered, so putting the folder back works at the next click.
@@ -95,6 +95,10 @@ const MB = 1024 * 1024;
 // signal), NAMED also reads a file in an error state again (Refresh, a watch batch that names it, the opt-in timer): a
 // change signal names no path, so it never re-reads a file that could not be shown (one more read over SSH each time).
 const FILE_TEXT = 1, FILE_ALL = 2, FILE_NAMED = 3;
+// The subfolders of $1, one name per line, dot folders included.
+const LIST_FOLDERS = 'cd "$1" 2>/dev/null || exit 2; for d in */ .*/; do [ -d "$d" ] && [ "$d" != "./" ] && [ "$d" != "../" ] && printf "%s\\n" "${d%/}"; done';
+// A path as one shell word.
+const shellQuote = (s) => "'" + s.replaceAll("'", "'\\''") + "'";
 const lf = (text) => String(text ?? "").replace(/\r\n?/g, "\n");
 // The save baseline of a file saved above 1 MiB (bigSaved: { path, size, hash, text, eol, mode }), as enterEdit and
 // saveFile use it: the bytes are the text in the file's line ends. null when the text cannot be encoded.
@@ -177,7 +181,7 @@ export default class FilerPro extends View {
           try { command = await nextCommand(); } catch { await cx.sleep(1000); continue; }
           if (!live(cx)) return;
           if (command === "reveal" && !panelShown(layout(), "filer-pro")) this.revealLast();
-          // my-menu's Go to Folder in Files: the panel may be hidden, so this always-shown copy puts it on screen.
+          // my-menu's Move Terminal to Folder: the panel may be hidden, so this always-shown copy puts it on screen.
           if (command === "show") for (const [c, a] of showSteps(layout(), "filer-pro")) run(c, a);
         }
       });
@@ -212,7 +216,8 @@ export default class FilerPro extends View {
     this.findInput.on("change", (_e, cx) => { this.findQuery = this.findInput.value(); this.findStep(0, cx); });
     this.findInput.on("submit", (e, cx) => this.findStep(e.shift ? -1 : 1, cx));
     this.gotoInput = InputState.new({ placeholder: "/path, ~/path or a path below this folder" });
-    this.gotoInput.on("change", (_e, cx) => { if (this.gotoError) { this.gotoError = null; cx.notify(); } });
+    this.gotoInput.on("change", (_e, cx) => { this.gotoError = null; this.suggest(cx); cx.notify(); });
+    this.gotoTarget = null; this.gotoSuggest = null; this.gotoSeq = 0; this.gotoCache = new Map();
     this.gotoInput.on("submit", (_e, cx) => this.submitGoto(cx));
     cx.spawn(async (cx) => {
       const cfg = this.cfg = await loadConfig(readTextFile, appHome, home);
@@ -2045,7 +2050,7 @@ export default class FilerPro extends View {
       this.navButton("files-top", "slash", `Go to ${nav.top ?? "/"}`, t, nav.up ? (cx) => this.navigate(nav.top, cx) : null),
       this.navButton("files-back-terminal", "folder-tree", "Back to the terminal's folder", t, nav.away ? (cx) => this.navigate(nav.here, cx) : null),
       this.navButton("files-up", "corner-left-up", "Up one level", t, nav.up ? (cx) => this.navigate(nav.up, cx) : null),
-      this.navButton("files-goto", "folder-input", "Go to folder…", t, this.root && paneId(focused()) ? (cx) => this.openRow("goto", null, cx) : null),
+      this.navButton("files-move-terminal", "square-terminal", "Move the terminal to a folder…", t, focused()?.terminal ? (cx) => this.openRow("goto", null, cx) : null),
       this.navButton("files-quick-open", "search", "Go to file", t, () => run("mod.open", { name: "my-filer-pro" })),
     ];
   }
@@ -2058,14 +2063,25 @@ export default class FilerPro extends View {
     return { root: this.root, up: pane ? upOf(this.root) : null, top: topOf(this.root), here, away };
   }
 
-  // The row under the header: "find" (cmd-f) or "goto" (the folder button, my-menu's Go to Folder in Files). value:
-  // the go-to row's text (default: the shown root).
-  openRow(kind, value, cx) {
+  // The row under the header: "find" (cmd-f) or "goto", the move-terminal row (the header button, my-menu's Move Terminal to
+  // Folder). value: the move row's text (default: the shown root); terminal: the one it moves (default: the focused one).
+  openRow(kind, value, cx, terminal = focused()?.terminal) {
+    if (kind === "goto" && !terminal) return;
     const opening = this.row !== kind;
     this.row = kind;
     if (kind === "find") { this.findInput.focus(); if (opening && this.findQuery) this.findStep(0, cx); }
-    else { this.gotoError = null; this.gotoInput.set_value(value ?? this.root ?? ""); this.gotoInput.focus(); }
+    else {
+      this.gotoError = null; this.gotoSuggest = null; this.gotoCache = new Map();
+      this.gotoTarget = { terminal, on: terminal.includes("/") ? terminal.split("/")[0] : null, ...this.terminalInfo(terminal) };
+      this.gotoInput.set_value(value ?? this.root ?? ""); this.gotoInput.focus(); this.suggest(cx);
+    }
     cx.notify();
+  }
+
+  // A terminal's display name, whether it is at a shell prompt, and the program's name.
+  terminalInfo(address) {
+    const program = (panes().find((p) => p.terminal === address) ?? terminals().find((x) => x.address === address))?.program;
+    return { name: terminals().find((x) => x.address === address)?.name || address, shell: program?.shell === true, program: program?.name ?? "another program" };
   }
 
   closeRow(cx) {
@@ -2083,37 +2099,20 @@ export default class FilerPro extends View {
     cx.notify();
   }
 
-  // The go-to row's Enter: the folder must exist on the panel's machine; then it becomes the shown root.
-  // shortcut: "~" is this computer's home also on a machine; type an absolute path there.
-  submitGoto(cx) {
-    const asked = this.gotoInput.value();
-    const abs = resolveGoto(asked, this.root ?? home(), home());
-    if (!abs) return;
-    const on = this.on;
-    cx.spawn(async (cx) => {
-      const r = await exec("test", ["-d", abs], { on, timeout: 10000 }).catch(() => null);
-      if (!(on === this.on && this.row === "goto" && this.gotoInput.value() === asked)) return;
-      if (!r) { this.gotoError = `Cannot reach ${on ?? "this computer"}`; cx.notify(); return; }
-      if (r.code !== 0) { this.gotoError = `Not a folder: ${abs}`; cx.notify(); return; }
-      if (!this.navigate(abs, cx) && abs !== this.root) { this.gotoError = "No terminal to follow: focus a terminal first"; cx.notify(); return; }
-      this.closeRow(cx);
-    });
-  }
-
-  // my-menu's Go to Folder in Files (shared filer-pro.goto-row = { id, machine, cwd }): opens the go-to row with that
-  // folder, once, in the panel that shows the same machine. Called from render, so it runs in a task.
+  // my-menu's Move Terminal to Folder (shared filer-pro.goto-row = { id, machine, cwd, terminal }): opens the move row for
+  // that terminal with its folder, once, in the panel that shows the same machine. Called from render, so it runs in a task.
   pollGotoRow(cx) {
     const r = shared("filer-pro.goto-row");
-    if (!r?.id || r.id === this.gotoRowSeen || r.applied) return;
+    if (!r?.id || !r.terminal || r.id === this.gotoRowSeen || r.applied) return;
     this.gotoRowSeen = r.id;
     if ((r.machine ?? null) !== (this.on ?? null)) {
-      cx.spawn(async () => notify({ title: "Go to folder", body: "Files shows another machine", level: "warning" }));
+      cx.spawn(async () => notify({ title: "Move terminal", body: "Files shows another machine", level: "warning" }));
       return;
     }
     cx.spawn(async (cx) => {
       await pauseOf(cx)();
       setShared("filer-pro.goto-row", { ...r, applied: true });
-      return this.requestLeave((cx) => { if (this.file) this.show(null); this.openRow("goto", r.cwd, cx); }, cx);
+      return this.requestLeave((cx) => { if (this.file) this.show(null); this.openRow("goto", r.cwd, cx, r.terminal); }, cx);
     });
   }
 
@@ -2123,7 +2122,9 @@ export default class FilerPro extends View {
       return findRow(t, { input: this.findInput, count: this.findQuery.trim() ? matchCount(matches, this.lastOpened) : "", none: Boolean(this.findQuery.trim()) && !matches.length },
         { onStep: (dir, cx) => this.findStep(dir, cx), onClose: (cx) => this.closeRow(cx) });
     }
-    return gotoRow(t, { input: this.gotoInput, error: this.gotoError }, { onGo: (cx) => this.submitGoto(cx), onClose: (cx) => this.closeRow(cx) });
+    const target = this.gotoTarget = { ...this.gotoTarget, ...this.terminalInfo(this.gotoTarget.terminal) };
+    return moveRow(t, { input: this.gotoInput, target, error: this.gotoError, suggest: this.gotoSuggest, prefix: this.gotoSuggest?.prefix ?? "" },
+      { onGo: (cx) => this.submitGoto(cx), onClose: (cx) => this.closeRow(cx), onKey: (e, cx) => this.moveKey(e, cx), onPick: (name, cx) => this.pickSuggest(name, cx) });
   }
 
   // A row's name; while the find row is open, the matched part is marked (the current match in the accent).

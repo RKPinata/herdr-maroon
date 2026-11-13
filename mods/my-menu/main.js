@@ -83,7 +83,7 @@ function items(p, git) {
             ]
           : []),
         ...(parent ? [[`Send back to ${parent.name || parent.address}`, "terminal.park", { terminal: term.address }]] : []),
-        ...(term && cwd ? [["Go to Folder in Files…", "files-goto", { machine: term.address.includes("/") ? term.address.split("/")[0] : null, cwd }]] : []),
+        ...(term && cwd ? [["Move Terminal to Folder…", "files-goto", { machine: term.address.includes("/") ? term.address.split("/")[0] : null, cwd, terminal: term.address }]] : []),
         ...(inTab && (term || tg.mod) ? [["Move to…", "move-menu", tg]] : []),
         ...(inTab ? [["Close pane", "pane.close", { pane: tg.pane }]] : []),
       ];
@@ -183,10 +183,10 @@ export default class Menu extends View {
       const n = items({ tab: "move", target: it[2] }).length;
       openOverlay({ mod: "my-menu", kind: "popup", width: 280, height: Math.min(31 * n + 12, 420), props: { tab: "move", target: it[2] } });
     } else if (it[1] === "worktree") openOverlay({ mod: "my-worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
-    // Files opens its go-to row with this folder (my-filer-pro pollGotoRow); mod commands carry no arguments, so the
-    // folder goes through shared state and the command only puts the panel on screen.
+    // Files opens its move-terminal row for this terminal and folder (my-filer-pro pollGotoRow); mod commands carry no
+    // arguments, so they go through shared state and the command only puts the panel on screen.
     else if (it[1] === "files-goto") {
-      setShared("filer-pro.goto-row", { id: Math.random().toString(36).slice(2, 10), machine: it[2].machine, cwd: it[2].cwd, at: Date.now() });
+      setShared("filer-pro.goto-row", { id: Math.random().toString(36).slice(2, 10), machine: it[2].machine, cwd: it[2].cwd, terminal: it[2].terminal, at: Date.now() });
       run("my-filer-pro.show");
     }
     else run(it[1], it[2]);

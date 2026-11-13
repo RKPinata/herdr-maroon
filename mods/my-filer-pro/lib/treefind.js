@@ -1,4 +1,4 @@
-// The find row's matching, Reveal's folder chain and the go-to row's path. Pure.
+// The find row's matching, Reveal's folder chain and the move-terminal row's path and folder completion. Pure.
 
 // The paths of rows (from visibleRows) whose name contains q, ignoring case, in row order. Note rows never match.
 export function findMatches(rows, q) {
@@ -34,7 +34,7 @@ export function matchRange(name, q) {
   return i < 0 ? null : [i, i + needle.length];
 }
 
-// The absolute folder a go-to entry names: "/abs", "~", "~/x" (home), or a path relative to root. "." and ".."
+// The absolute folder a move-terminal entry names: "/abs", "~", "~/x" (home), or a path relative to root. "." and ".."
 // parts are resolved; a trailing slash is dropped. null for an empty entry.
 export function resolveGoto(text, root, home) {
   const t = text.trim();
@@ -48,4 +48,26 @@ export function resolveGoto(text, root, home) {
     else out.push(part);
   }
   return "/" + out.join("/");
+}
+
+// The folder to list and the name typed so far in a go-to entry: "~/Re" -> { dir: "<home>/", prefix: "Re" }; an entry
+// ending in "/" has the prefix "". null for an empty entry (or "~" without a home).
+export function completionBase(text, root, home) {
+  if (!text.trim()) return null;
+  const cut = text.lastIndexOf("/") + 1;
+  const dir = resolveGoto(cut ? text.slice(0, cut) : ".", root, home);
+  return dir && { dir, prefix: text.slice(cut) };
+}
+
+// At most max folder names for the typed prefix, ignoring case: names starting with it, then names containing it.
+// Dot names only when the prefix starts with ".".
+export function filterFolders(names, prefix, max = 8) {
+  const p = prefix.toLowerCase(), shown = names.filter((n) => prefix.startsWith(".") || !n.startsWith("."));
+  const starts = shown.filter((n) => n.toLowerCase().startsWith(p));
+  return [...starts, ...shown.filter((n) => !starts.includes(n) && n.toLowerCase().includes(p))].slice(0, max);
+}
+
+// The entry with its last segment replaced by the folder name and a "/": "~/Re" + "Repo" -> "~/Repo/".
+export function applyCompletion(text, name) {
+  return `${text.slice(0, text.lastIndexOf("/") + 1)}${name}/`;
 }

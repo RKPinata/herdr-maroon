@@ -6,7 +6,7 @@ Search features for the `my-filer-pro` mod:
 2. A popup to use it, opened with `cmd-k` or a header button.
 3. Reveal in tree: the picked file opens, and the tree expands to it and scrolls to it.
 4. A find row that matches names in the visible tree.
-5. A go-to row that moves the Files root to a typed path, also opened from the pane menu.
+5. A move-terminal row that types `cd <folder>` into a terminal and shows that folder in Files, also opened from the pane menu.
 
 Content search (text inside files) is not part of this design.
 
@@ -17,7 +17,7 @@ Content search (text inside files) is not part of this design.
  (mod.open:my-filer-pro)                │                      │
       │                                 ▼                      ▼
       ▼                        ┌──────────────────┐   ┌──────────────────┐
-┌──────────────────┐           │ find row          │   │ go-to row         │
+┌──────────────────┐           │ find row          │   │ move-terminal row │
 │ ui/quickopen.js  │           │ (one row slot under the header)          │
 │ popup copy       │           └────────┬─────────┘   └────────┬─────────┘
 └───┬─────────▲────┘                    │ scrollToRow          │ navigate(path)
@@ -34,12 +34,12 @@ Content search (text inside files) is not part of this design.
 |---|---|---|
 | `lib/fuzzy.js` | VS Code's quick-open scorer: score and compare one file | nothing |
 | `lib/finder.js` | Writes a root's file list to a file on its machine, filters it per query with `fzf` (or `grep`), ranks the hits with `lib/fuzzy.js`, keeps the recent list | `exec` and file functions passed in |
-| `lib/treefind.js` | Find-row matching and stepping, a path's parent folders, go-to path resolution | nothing |
+| `lib/treefind.js` | Find-row matching and stepping, a path's parent folders, move-row path resolution and folder completion | nothing |
 | `ui/quickopen.js` | The popup: input, virtual list, two groups, keyboard | a finder |
-| `ui/treerow.js` | The find row and the go-to row | nothing |
+| `ui/treerow.js` | The find row and the move-terminal row | nothing |
 | `revealInTree`, `scrollToRow` (main.js) | Expand parent folders, load them, scroll to a row | `refresh`, `visible()`, `treeScroll` |
 | `pollPick`, `openPicked` (main.js) | Take a pick from the popup and open the file | `expandPath`, `show`, `openInNvim` |
-| Pane-menu item (`my-menu`) | Ask Files to open its go-to row with the pane's folder | `setShared`, `run` |
+| Pane-menu item (`my-menu`) | Ask Files to open its move-terminal row for the pane's terminal and folder | `setShared`, `run` |
 
 ## Finder engine: `lib/finder.js`
 
@@ -172,9 +172,9 @@ A file inside a macOS package has no row: the reveal scrolls to and selects the 
 Files  Repo   [/] [⌂] [↰] [📁→] [⌕] [⟳] [⚙]
 ```
 
-`📁→` (`folder-input.svg`) opens the go-to row. `⌕` (`search.svg`) opens the popup. The find row has no button.
+`>_` (`square-terminal.svg`, tooltip "Move the terminal to a folder…", id `files-move-terminal`) opens the move-terminal row; it needs a focused terminal. `⌕` (`search.svg`) opens the popup. The find row has no button.
 
-One slot under the header shows `this.row`: `null`, `"find"` or `"goto"`. Opening one closes the other. The slot is hidden while the file viewer is shown.
+One slot under the header shows `this.row`: `null`, `"find"` or `"goto"` (the move-terminal row). Opening one closes the other. The slot is hidden while the file viewer is shown.
 
 ### Find row
 
@@ -189,22 +189,33 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"`. Openin
 - Other matches: matched text on `t.selection`. Current match: matched text on `t.accent` in `t.accent_foreground`.
 - ⏎ selects and scrolls; it does not open. Esc closes the row and keeps the selection. The query stays for the next `cmd-f`.
 
-### Go-to row
+### Move-terminal row
 
 ```
-📁 [~/Repo/claude-obsidian▍]  [Go] [✕]
+[>_ cd · zsh]  [~/Repo/claude-obsidian▍]  [Move terminal] [✕]
+  📁 claude-obsidian
+  📁 claude-code
 ```
 
-- Opens from `📁→`, filled with the shown root, or from the pane menu, filled with that pane's folder. The input has focus.
-- Accepts an absolute path, `~/…` (this computer's home), or a path relative to the shown root. ⏎ runs `exec("test", ["-d", abs], { on })` on the panel's machine.
-- Success: `navigate(abs, cx)` moves the root and `closeRow` gives focus back to the panel. ⌂ becomes active, because the root is no longer the terminal's folder.
-- Failure: the error in `t.ansi1` inside the row, and the row stays open: "Not a folder: <path>", "Cannot reach <machine or this computer>" when `exec` rejects, or "No terminal to follow: focus a terminal first" when `navigate` returns false and the folder is not already the root.
-- A reply is dropped when the panel's machine, the open row or the input text changed since Enter.
-- The `📁→` button needs a focused terminal pane, like Up.
+- Acts on one terminal, `this.gotoTarget = { terminal, on, name, shell, program }`: the focused terminal when the row opens from the header button, the right-clicked pane's terminal when it opens from the pane menu. `shell` and `program` come from that terminal's `program` (`program.shell`, `program.name`) and are read again on every render.
+- The chip shows the terminal icon and `cd · <terminal name or address>`. The input opens filled with the shown root (from the pane menu: that pane's folder) and has focus. The primary button is "Move terminal".
+- A terminal that is not at a shell prompt disables the button and puts `<name> is running <program>: nothing will be typed` in `t.ansi1` under the row. Errors use the same line.
+- Accepts an absolute path, `~/…` (this computer's home), or a path relative to the shown root. ⏎ or the button runs `exec("test", ["-d", abs], { on })` on the terminal's machine, then checks that the terminal is still at a shell prompt, then runs `hc send <terminal> "cd '<abs>'"` (the path single-quoted, a `'` inside as `'\''`).
+- Success: `navigate(abs, cx)` shows the folder in Files at once, and `closeRow` gives focus back to the panel. The terminal's own folder reaches it a moment later, which ends the override.
+- Failure: the message in `t.ansi1`, and the row stays open: "Not a folder: <path>", "Cannot reach <machine or this computer>" when `exec` rejects, `hc`'s stderr when `send` fails, or the not-a-shell line.
+- A reply is dropped when the open row, its terminal or the input text changed since Enter.
+- The `exec` call has a 10 s timeout.
+
+Folder completion:
+
+- `completionBase(text, root, home)` gives `{ dir, prefix }`: for text ending in "/" the resolved text and an empty prefix, else the resolved parent and the last segment. `filterFolders(names, prefix, max = 8)` keeps names that start with the prefix, then names that contain it, ignoring case; dot names only when the prefix starts with ".". `applyCompletion(text, name)` replaces the last segment with `name + "/"`.
+- 80 ms after the last input change (a sequence number drops older waits), the panel lists `dir` with `sh -c` on the terminal's machine (5 s timeout) and stores `this.gotoSuggest = { items, at, prefix }`. Listings are cached per machine and folder while the row is open.
+- The suggestions are 30 px rows under the input, each with a folder icon and the typed part of the name in semibold. The highlighted row is drawn with `card()`.
+- Tab takes the highlighted suggestion, ↑ and ↓ move the highlight, Esc closes the row, ⏎ runs the move on the typed text. A click on a suggestion takes it. Taking a suggestion keeps focus in the input and lists the folders inside it.
 
 ### Pane menu (`my-menu`)
 
-`items()` case `"pane"` gets "Go to Folder in Files…" for terminal panes with a known folder. It writes `setShared("filer-pro.goto-row", { id, machine, cwd, at })` (`at` is `Date.now()`; a request older than 5 s is a leftover that a starting panel ignores) and runs `my-filer-pro.show`. Mod commands carry no arguments, so the folder travels in the shared key. The always-shown button copy of `my-filer-pro` answers `show` by showing the Files panel (`showSteps`). The panel picks the shared key up in `render` (`pollGotoRow`) and opens the go-to row filled with `cwd`, leaving an open file first (`requestLeave`). A request for another machine than the panel shows gives the toast "Files shows another machine" and is not marked applied. The folder check runs `test -d` with a 10 s timeout.
+`items()` case `"pane"` gets "Move Terminal to Folder…" for terminal panes with a known folder. It writes `setShared("filer-pro.goto-row", { id, machine, cwd, terminal, at })` (`terminal` is the pane's terminal address; `at` is `Date.now()`; a request older than 5 s is a leftover that a starting panel ignores) and runs `my-filer-pro.show`. Mod commands carry no arguments, so the terminal and folder travel in the shared key. The always-shown button copy of `my-filer-pro` answers `show` by showing the Files panel (`showSteps`). The panel picks the shared key up in `render` (`pollGotoRow`) and opens the move-terminal row for `terminal`, filled with `cwd`, leaving an open file first (`requestLeave`). A request for another machine than the panel shows gives the toast "Files shows another machine" and is not marked applied.
 
 ## Errors
 
@@ -217,7 +228,10 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"`. Openin
 | Pick beyond the list limits | File opens; toast "Beyond the list limit, not shown in the tree" |
 | Unsaved edits in the viewer | `requestLeave` asks first |
 | `recent.json` write conflict | Read again, retry once, then drop the entry |
-| Go-to path is not a folder | Message in the row; the row stays open |
+| Move path is not a folder | Message in the row; the row stays open |
+| Terminal is not at a shell prompt | Button disabled; the row says what the terminal runs |
+| `hc send` fails | `hc`'s stderr in the row; the row stays open |
+| Folder listing for completion fails | No suggestions |
 
 ## Testing
 
@@ -225,7 +239,7 @@ Pure code is checked with `node` assert scripts in `mods/my-filer-pro/test/`, ru
 
 - `fuzzy.test.mjs`: ranking order, path queries, multi-word queries, highlight ranges.
 - `finder.test.mjs`: the line suffix, the fzf query and grep pattern, ranking with groups and hidden files, the recent list, both shell scripts on a real temporary folder, the cache, `stepRow`.
-- `treefind.test.mjs`: `findMatches`, `stepMatch`, `matchCount`, `ancestorsOf`, `matchRange`, `resolveGoto`.
+- `treefind.test.mjs`: `findMatches`, `stepMatch`, `matchCount`, `ancestorsOf`, `matchRange`, `resolveGoto`, `completionBase`, `filterFolders`, `applyCompletion`.
 - `panels.test.mjs`: `showSteps` for a stack and a column.
 
 `herdr-app check ~/.config/herdr-app/mods/my-filer-pro` and `herdr-app check ~/.config/herdr-app/mods/my-menu` must pass. Checks in a running Herdr:
