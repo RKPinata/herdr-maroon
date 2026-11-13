@@ -2093,7 +2093,7 @@ export default class FilerPro extends View {
     const root = v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(boxy(t, "files-back", "←", { h: 20, px: 5, size: 13, onClick: (_e, cx) => this.requestLeave((cx) => { this.show(null); cx.notify(); }, cx) })))
-        .child(div().flex_none().font_semibold().child("Filer Pro"))
+        .child(div().flex_none().font_semibold().child("Files"))
         .when(Boolean(update), el => el.child(this.tool("files-update", div().text_color(t.ansi4).child(`● ${update.version} available`), t, (cx) => cx.open_url(update.url)).flex_none()))
         .child(this.fileTitle(t, dark, true))
         .when(!this.file, el => el.children(this.navButtons(t)))
