@@ -51,14 +51,17 @@ function suggestions(t, { items, at }, prefix, width, scroll, onPick) {
       .child(Scrollbar.vertical("files-move-suggest-list").absolute().inset_0()));
 }
 
-// The row that types `cd <folder>` into one terminal: what moves where, the input with its folder dropdown and the
-// button. The message (error, or the not-a-shell note) sits on line 1, so the dropdown never covers it.
-// state: { input, target: { name, shell, program }, error, suggest: { items, at } | null, prefix (the typed folder name),
+// The row that types `cd <folder>` into a shell or `/cd <folder>` into Claude Code: what moves where, the input with its
+// folder dropdown and the button. The message (error, or why nothing can be typed now) sits on line 1, so the dropdown
+// never covers it.
+// state: { input, target: { name, kind, ready, program }, error, suggest: { items, at } | null, prefix (the typed folder name),
 // width (the input's in style px, for the dropdown), scroll (the dropdown's VirtualListScrollHandle) };
 // handlers: { onGo(cx), onClose(cx), onKey(e, cx) (true when it took the key), onPick(name, cx), onWidth(px, cx) }
 export function moveRow(t, state, handlers) {
   const { target, suggest } = state;
-  const note = state.error ?? (target.shell ? null : `${target.name} is running ${target.program}: nothing will be typed`);
+  const note = state.error ?? (target.ready ? null : target.kind === "claude" ? `Claude Code is busy in ${target.name}: try again when it stops`
+    : `${target.name} is running ${target.program}: nothing will be typed`);
+  const what = { shell: "shell", claude: "Claude Code" }[target.kind] ?? target.program;
   const input = field(t, state.input).id("files-move-field").w_full();
   return v_flex().id("files-move-row").flex_none().px(10).py(8).gap(6).border_b(1).border_color(t.border).text_color(t.foreground)
     .on_key_down((e, cx) => {
@@ -69,12 +72,12 @@ export function moveRow(t, state, handlers) {
       .child(svg(`${BASE}/square-terminal.svg`).size(14).flex_none().text_color(t.foreground))
       .child(div().flex_none().child("Move terminal"))
       .child(div().min_w(0).truncate().font_semibold().child(target.name))
-      .child(div().flex_none().child("to"))
+      .child(div().flex_none().child(`(${what}) to`))
       .child(note ? div().id("files-move-note").flex_1().min_w(0).truncate().text_size(11.5).text_color(t.ansi1).child(note).tooltip(note) : div().flex_1())
       .child(iconButton(t, "files-move-close", "x", "Close", (cx) => handlers.onClose(cx))))
     .child(h_flex().w_full().gap(6).items_center()
       .child(div().id("files-move-slot").flex_1().min_w(0).on_size_change((size, cx) => handlers.onWidth(size.width, cx))
         .child(Popup.new("files-move-popup", input).w_full().anchor("top_left")
           .when(Boolean(suggest?.items.length && state.width), (el) => el.content(suggestions(t, suggest, state.prefix, state.width, state.scroll, handlers.onPick)))))
-      .child(boxy(t, "files-move-go", "Move terminal", { kind: "primary", h: 22, px: 8, size: 11.5, disabled: !target.shell, onClick: target.shell ? (_e, cx) => handlers.onGo(cx) : undefined })));
+      .child(boxy(t, "files-move-go", "Move terminal", { kind: "primary", h: 22, px: 8, size: 11.5, disabled: !target.ready, onClick: target.ready ? (_e, cx) => handlers.onGo(cx) : undefined })));
 }

@@ -6,7 +6,7 @@ Search features for the `my-filer-pro` mod:
 2. A popup to use it, opened with `cmd-k` or a header button.
 3. Reveal in tree: the picked file opens, and the tree expands to it and scrolls to it.
 4. A find row that matches names in the visible tree.
-5. A move-terminal row that types `cd <folder>` into a terminal and shows that folder in Files, also opened from the pane menu.
+5. A move-terminal row that types `cd <folder>` into a shell, or `/cd <folder>` into Claude Code, and shows that folder in Files, also opened from the pane menu.
 
 Content search (text inside files) is not part of this design.
 
@@ -192,7 +192,7 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"` (the mo
 ### Move-terminal row
 
 ```
->_ Move terminal t3g to                              [✕]
+>_ Move terminal t3g (shell) to                      [✕]
 [/Users/danish/Repo/▍                  ] [Move terminal]
 ┌───────────────────────────────────────┐
 │ 📁 Faah                               │   floats over the tree
@@ -203,16 +203,21 @@ One slot under the header shows `this.row`: `null`, `"find"` or `"goto"` (the mo
 A message shows on line 1, after "to":
 
 ```
->_ Move terminal t3g to  t3g is running Claude Code: nothing will be typed…  [✕]     (t.ansi1)
+>_ Move terminal t3g (Claude Code) to  Claude Code is busy in t3g: try again…  [✕]     (t.ansi1)
 ```
 
-- Acts on one terminal, `this.gotoTarget = { terminal, on, name, shell, program }`: the focused terminal when the row opens from the header button, the right-clicked pane's terminal when it opens from the pane menu. `shell` and `program` come from that terminal's `program` (`program.shell`, `program.name`, else the first word of its `argv` from `terminals()`, else "another program") and are read again on every render.
-- Line 1: the `square-terminal` icon, "Move terminal <terminal name or address> to" (the name semibold) and ✕ at the right; between them the message in `t.ansi1`, truncated, with the full text as its tooltip. Line 2: the input at full width, then the primary button "Move terminal".
+- Acts on one terminal, `this.gotoTarget = { terminal, on, name, kind, ready, program }`: the focused terminal when the row opens from the header button, the right-clicked pane's terminal when it opens from the pane menu. `terminalInfo` fills the rest from that terminal's `program` and its `terminals()` entry, again on every render:
+  - `kind`: `"shell"` when `program.shell` is true; `"claude"` when `program.key` or the entry's `foreground.name` is `"claude"`; else `"other"`.
+  - `ready`: a shell, or Claude Code whose `status` is `idle` or `done`.
+  - `program`: `program.name`, else the first word of `argv`, else "another program".
+- Line 1: the `square-terminal` icon, "Move terminal <terminal name or address> (<what>) to" (the name semibold; `<what>` is `shell`, `Claude Code` or the program) and ✕ at the right; between them the message in `t.ansi1`, truncated, with the full text as its tooltip. Line 2: the input at full width, then the primary button "Move terminal".
 - The input opens with focus, filled with the shown root (from the pane menu: that pane's folder) and a trailing "/", so the dropdown lists that folder's subfolders at once.
-- A terminal that is not at a shell prompt disables the button, and the message says `<name> is running <program>: nothing will be typed`.
-- Accepts an absolute path, `~/…` (this computer's home), or a path relative to the shown root. ⏎ or the button runs `exec("test", ["-d", abs], { on })` on the terminal's machine (10 s timeout), then checks that the terminal is still at a shell prompt, then runs `hc send <terminal> "cd '<abs>'"` (the path single-quoted, a `'` inside as `'\''`).
-- Success: `navigate(abs, cx)` shows the folder in Files at once, and `closeRow` gives focus back to the panel. The terminal's own folder reaches it a moment later, which ends the override.
-- Failure: the message on line 1, and the row stays open: "Not a folder: <path>", "Cannot reach <machine or this computer>" when `exec` rejects, `hc`'s stderr when `send` fails, or the not-a-shell line.
+- A terminal that is not `ready` disables the button. The message says `Claude Code is busy in <name>: try again when it stops` for Claude Code, else `<name> is running <program>: nothing will be typed`.
+- Accepts an absolute path, `~/…` (this computer's home), or a path relative to the shown root. ⏎ or the button runs `exec("test", ["-d", abs], { on })` on the terminal's machine (10 s timeout), then checks that the terminal still has the same `kind` and is `ready`, then sends the command with `hc send <terminal> <command>`:
+  - Shell: `cd '<abs>'` (the path single-quoted, a `'` inside as `'\''`).
+  - Claude Code: `/cd <abs>`, Claude Code's own command, which moves the session and its process folder. A path with whitespace is refused before `test -d` with `Claude Code cannot /cd into a path with spaces`. A folder the session has not used before makes Claude Code ask in its pane whether to move there; the person answers it there.
+- Success: `navigate(abs, cx)` shows the folder in Files at once, and `closeRow` gives focus back to the panel. For Claude Code, `run("pane.focus", { terminal })` then gives the keyboard to its pane, so the person sees the trust question if one comes. The terminal's own folder reaches Files a moment later, which ends the override.
+- Failure: the message on line 1, and the row stays open: "Not a folder: <path>", "Cannot reach <machine or this computer>" when `exec` rejects, `hc`'s stderr when `send` fails, the spaces line, or the busy or not-a-shell line.
 - A reply is dropped when the open row, its terminal or the input text changed since Enter.
 
 Folder dropdown:

@@ -2081,12 +2081,16 @@ export default class FilerPro extends View {
     cx.notify();
   }
 
-  // A terminal's display name, whether it is at a shell prompt, and the program's name (else its command's first word).
+  // A terminal's display name, its kind ("shell" at a shell prompt, "claude" running Claude Code, else "other"), whether
+  // the move can type into it now (a shell, or Claude Code idle or done), and the program's name (else its command's
+  // first word).
   terminalInfo(address) {
     const term = terminals().find((x) => x.address === address);
     const program = (panes().find((p) => p.terminal === address) ?? term)?.program;
     const command = [term?.argv ?? []].flat()[0]?.split(" ")[0].split("/").pop();
-    return { name: term?.name || address, shell: program?.shell === true, program: program?.name || command || "another program" };
+    const kind = program?.shell === true ? "shell" : program?.key === "claude" || term?.foreground?.name === "claude" ? "claude" : "other";
+    const ready = kind === "shell" || (kind === "claude" && (term?.status === "idle" || term?.status === "done"));
+    return { name: term?.name || address, shell: kind === "shell", kind, ready, program: program?.name || command || "another program" };
   }
 
   // The move row's folder dropdown for the typed text: 80 ms after the last change, the folder being typed is listed on
@@ -2137,8 +2141,9 @@ export default class FilerPro extends View {
   }
 
   // The move row's Enter and button. After ↓ or ↑, Enter takes the highlighted folder instead. Else the folder must exist
-  // on the terminal's machine and the terminal must still be at a shell prompt; then it gets `cd '<abs>'`, Files shows
-  // the folder and the row closes. A reply is dropped when the row, its terminal or the text changed meanwhile.
+  // on the terminal's machine and the terminal must still be of the same kind and ready; then a shell gets `cd '<abs>'`
+  // and Claude Code gets `/cd <abs>` and the keyboard (its pane may ask whether to trust the folder), Files shows the
+  // folder and the row closes. A reply is dropped when the row, its terminal or the text changed meanwhile.
   // shortcut: "~" is this computer's home also on a machine; type an absolute path there.
   submitGoto(cx) {
     const s = this.gotoSuggest;
@@ -2146,18 +2151,24 @@ export default class FilerPro extends View {
     const asked = this.gotoInput.value(), target = this.gotoTarget;
     const abs = resolveGoto(asked, this.root ?? home(), home());
     if (!abs || !target) return;
+    // shortcut: `/cd` is untested with quoting, so a path with spaces is refused; try quoting when one is needed.
+    if (target.kind === "claude" && /\s/.test(abs)) { this.gotoError = "Claude Code cannot /cd into a path with spaces"; cx.notify(); return; }
     const same = () => this.row === "goto" && this.gotoTarget?.terminal === target.terminal && this.gotoInput.value() === asked;
     cx.spawn(async (cx) => {
       const r = await exec("test", ["-d", abs], { on: target.on, timeout: 10000 }).catch(() => null);
       if (!same()) return;
       if (!r) { this.gotoError = `Cannot reach ${target.on ?? "this computer"}`; cx.notify(); return; }
       if (r.code !== 0) { this.gotoError = `Not a folder: ${abs}`; cx.notify(); return; }
-      // Not at a prompt any more: render shows the not-a-shell line.
-      if (!this.terminalInfo(target.terminal).shell) { cx.notify(); return; }
-      const sent = await hc(["send", target.terminal, `cd ${shellQuote(abs)}`]).catch((e) => ({ code: -1, stderr: String(e?.message ?? e) }));
+      // Busy or running something else now: render shows that line.
+      const now = this.terminalInfo(target.terminal);
+      if (now.kind !== target.kind || !now.ready) { cx.notify(); return; }
+      const line = now.kind === "claude" ? `/cd ${abs}` : `cd ${shellQuote(abs)}`;
+      const sent = await hc(["send", target.terminal, line]).catch((e) => ({ code: -1, stderr: String(e?.message ?? e) }));
       if (sent.code !== 0) { if (same()) { this.gotoError = sent.stderr.trim() || "The terminal did not take the command"; cx.notify(); } return; }
       this.navigate(abs, cx);
       if (this.row === "goto") this.closeRow(cx);
+      // After closeRow, which focuses the tree.
+      if (now.kind === "claude") run("pane.focus", { terminal: target.terminal });
     });
   }
 
