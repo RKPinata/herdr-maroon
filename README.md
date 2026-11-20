@@ -29,6 +29,7 @@ Read README.md and RECIPE.md first, then:
 | `settings.json` | merge into `~/.config/herdr-app/settings.json` | Fonts, zoom, theme per appearance |
 | `scripts/rename-prefix.sh` | stays here | Renames every `my-*` mod and all references to it |
 | `scripts/install-nvim.sh` | stays here | Builds `nvim/` and installs `my-nvim` with its wrapper |
+| `scripts/sandbox.sh` | stays here | Runs this package in a second Herdr window with its own core, to try changes. See `CLAUDE.md` |
 
 ## Install
 
