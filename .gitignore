@@ -1,2 +1,4 @@
 mods/my-nvim/bin/
 .superpowers/
+node_modules/
+.cache/

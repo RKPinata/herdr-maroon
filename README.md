@@ -1,20 +1,8 @@
 # Maroon
 
-A complete Herdr App setup: one layout, its theme, its keys, and every mod it uses, each one an editable `my-*` copy. Copy it into `~/.config/herdr-app` and change anything.
+My Herdr App setup: one layout, its theme, its keys, every mod it uses, and the `herdr` Claude Code plugin.
 
 ![Maroon](preview.png)
-
-To install, paste this into a coding agent on the machine that runs Herdr:
-
-```
-Add the Herdr layout at https://github.com/RKPinata/herdr-maroon to my Herdr app.
-Follow "Layouts and mods other people made" in ~/.config/herdr-app/AGENTS.md.
-Read README.md and RECIPE.md first, then:
-- Rename the repo's my-* mods with scripts/rename-prefix.sh if any name clashes with my mods.
-- Merge settings.json into mine. Ask before you replace a setting I use.
-- Tell me what each mod needs (programs, the Claude Code settings in README.md) and what I am missing.
-- Run herdr-app check on each mod, then switch to the maroon layout.
-```
 
 `RECIPE.md` describes what you see and how to rebuild it from scratch.
 
@@ -27,17 +15,15 @@ Read README.md and RECIPE.md first, then:
 | `mods/` | `~/.config/herdr-app/mods/` | 16 `my-*` mods, plus `linear`, `agent-switcher`, `agent-resume` |
 | `nvim/` | built by `scripts/install-nvim.sh` | Source of `my-nvim`'s binary and Lua plugin (Rust, MIT, from ChmaraX/herdr-nvim) |
 | `settings.json` | merge into `~/.config/herdr-app/settings.json` | Fonts, zoom, theme per appearance |
-| `scripts/rename-prefix.sh` | stays here | Renames every `my-*` mod and all references to it |
+| `plugin/`, `.claude-plugin/` | the `maroon` marketplace | The `herdr` Claude Code plugin: whiteboard and mods skills, SessionStart hook. See `docs/whiteboard.md` |
+| `scripts/install-whiteboard.sh` | stays here | Copies `claude-whiteboard` into the live home and installs `herdr@maroon` |
+| `scripts/fetch-schema.sh` | stays here | Downloads Linear's GraphQL schema for `npm test`. See `docs/linear.md` |
 | `scripts/install-nvim.sh` | stays here | Builds `nvim/` and installs `my-nvim` with its wrapper |
 | `scripts/sandbox.sh` | stays here | Runs this package in a second Herdr window with its own core, to try changes. See `CLAUDE.md` |
 
 ## Install
 
-1. Check for name clashes. If `~/.config/herdr-app/mods/` already has a `my-*` folder with a name used here, rename this package's mods first:
-   ```sh
-   scripts/rename-prefix.sh my- rk-
-   ```
-2. Copy the files:
+1. Copy the files:
    ```sh
    H=~/.config/herdr-app
    cp layouts/maroon.json "$H/layouts/"
@@ -45,14 +31,12 @@ Read README.md and RECIPE.md first, then:
    cp -R mods/* "$H/mods/"
    scripts/install-nvim.sh
    ```
-3. Merge `settings.json` into yours by hand.
-4. Check each mod:
+2. Merge `settings.json` into yours by hand.
+3. Check each mod:
    ```sh
    for m in mods/*; do herdr-app check "$H/mods/${m#mods/}"; done
    ```
-5. Switch to the layout with `herdr-app do layout.switch '{"name":"maroon"}'`, or cycle layouts with `cmd-shift-l`.
-
-An agent can do all of this. Point it at this folder and the section "Layouts and mods other people made" in `~/.config/herdr-app/AGENTS.md`.
+4. Switch to the layout with `herdr-app do layout.switch '{"name":"maroon"}'`, or cycle layouts with `cmd-shift-l`.
 
 ## What it needs
 
@@ -92,7 +76,6 @@ An agent can do all of this. Point it at this folder and the section "Layouts an
 - **Clone of a docked mod.** A clone of a mod with `"place": "right"` adds its own block to the layout. Remove that block and set `place` to `none` in the clone's `mod.json`.
 - **Change the colors** in `themes/maroon.json`. Every mod reads them from the theme.
 - **Change the buttons** in `boxy.js`. It draws the boxed buttons and segmented controls: outline, face, and a 2px bottom lip that turns accent when active. Each mod that draws buttons has its own copy. Keep the copies the same.
-- **Change the prefix** with `scripts/rename-prefix.sh <old> <new>`. It renames folders and references, leaves `cloned_from` alone, and lists any leftovers. Mods that save state under their name start fresh after a rename.
 
 ## Credits
 

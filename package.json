@@ -1,0 +1,11 @@
+{
+  "name": "herdr-maroon",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pretest": "test -f .cache/linear-schema.graphql || bash scripts/fetch-schema.sh",
+    "test": "node --test 'tests/**/*.test.mjs'",
+    "schema": "bash scripts/fetch-schema.sh"
+  },
+  "devDependencies": { "graphql": "^16.9.0" }
+}
