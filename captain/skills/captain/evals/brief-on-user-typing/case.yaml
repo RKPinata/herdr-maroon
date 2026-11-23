@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: brief-on-user-typing
+expected_outcome: |
+  reply.md briefs the user with the needs-you item first; captain.md's Since last check-in is empty; Region C's Jobs line reads done, briefed; board.md drops the Calls I made bullets.
+context:
+  scaffold_script: place-files.sh

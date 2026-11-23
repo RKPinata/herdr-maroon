@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: board-edit-is-input
+expected_outcome: |
+  The ticked needs-you item leaves captain.md; the hand-edited Region B status (on hold) is applied to captain.md; the report is recorded; board.md is re-rendered from captain.md.
+context:
+  scaffold_script: place-files.sh

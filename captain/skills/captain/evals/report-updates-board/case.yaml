@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: report-updates-board
+expected_outcome: |
+  captain.md's Region A Jobs line reads 7 of 10 done; the report is in Since last check-in; board.md is the render of the new captain.md; messages.md has no reply to region-a-3c; reply.md is empty or absent.
+context:
+  scaffold_script: place-files.sh

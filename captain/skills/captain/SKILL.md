@@ -58,7 +58,7 @@ The file has four sections: Scope, Needs you, Jobs and Since last check-in.
 - **Crew lines.** Each crew line gives the session name, its terminal, who opened it (`opened by captain` or `user's tab`) and its job. You close only tabs you opened, so keep the terminal and the opener current.
 - **Needs you.** One `- [ ]` line per item: the crew session and why the user must go to its tab.
 - **Jobs.** One line per job in the scope: `<job>: <status>, <crew>`. Write `no crew` for a job that nobody holds. A done job that has been in a brief reads `<job>: done, briefed, <crew>`. The job line goes when its tab closes.
-- **Since last check-in.** One line per report (`<crew>: <what moved>`) and one per call you made (`Call: <what you decided>`). It empties after each brief.
+- **Since last check-in.** One line per report (`<crew>: <what moved>`) and one per call you made (`Call: <what you decided>`), each added at the end. It empties after each brief, down to its heading and one blank line.
 
 ## Board
 
@@ -67,19 +67,21 @@ Get the board path from the `herdr:whiteboard` skill. Its path rule applies. The
 Render the board from `captain.md` the same way every time, so that any difference is a user edit:
 
 1. `## Needs you`: the Needs you lines of `captain.md`, unchanged.
-2. `## Jobs`: one row per Jobs line, in the same order. Drop the leading `- ` and `, briefed`. The columns are the job (before the colon), the status, and the crew (after the last comma). Write `no crew` as `(no crew)`. Pad the first two columns to their longest entry plus three spaces. Then one row per crew session with no job: `(idle)`, `idle`, and the session name.
+2. `## Jobs`: a table with the header `| Job | Status | Crew |` and `|---|---|---|`, then one row per Jobs line, in the same order. Drop the leading `- ` and `, briefed`. The cells are the job (before the colon), the status, and the crew (after the last comma). Write `no crew` as `(no crew)`. Then one row per crew session with no job: `(idle)`, `idle`, and the session name. Write each row as `| a | b | c |` with no padding.
 3. `## Calls I made`: each `Call:` line from Since last check-in, as a `- ` bullet without the `Call: ` prefix.
 
 The Jobs lines of the example in [first-start.md](first-start.md) render as:
 
 ```
-Region A e2e specs   6 of 10 done          region-a-3c
-Region B e2e specs   blocked on Region A   (no crew)
-WEB-1234 bugfix      PR open               bugfix-7c
-Region C e2e specs   done                  region-c-9a
+| Job | Status | Crew |
+|---|---|---|
+| Region A e2e specs | 6 of 10 done | region-a-3c |
+| Region B e2e specs | blocked on Region A | (no crew) |
+| WEB-1234 bugfix | PR open | bugfix-7c |
+| Region C e2e specs | done | region-c-9a |
 ```
 
-Leave a section heading in place when the section is empty.
+An empty section is its heading and one blank line.
 
 **User edits.** A ticked needs-you item leaves `captain.md`. A tick on a scope change only clears the item: the scope changes on a yes typed in this tab. Apply any other edit to `captain.md` as the user's input.
 
