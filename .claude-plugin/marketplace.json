@@ -6,6 +6,11 @@
       "name": "herdr",
       "source": "./plugin",
       "description": "Herdr skills: a markdown whiteboard shown in a Herdr pane, and how to change Herdr mods without touching the live window"
+    },
+    {
+      "name": "captain",
+      "source": "./captain",
+      "description": "A captain session that tracks the crew sessions in a Herdr workspace and briefs the user, and the skill crew load to report to it"
     }
   ]
 }

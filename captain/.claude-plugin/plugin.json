@@ -1,0 +1,5 @@
+{
+  "name": "captain",
+  "version": "0.1.0",
+  "description": "A captain session that tracks the crew sessions in a Herdr workspace and briefs the user, and the skill crew load to report to it"
+}
