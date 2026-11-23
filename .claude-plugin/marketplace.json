@@ -1,0 +1,11 @@
+{
+  "name": "maroon",
+  "owner": { "name": "Danish" },
+  "plugins": [
+    {
+      "name": "herdr",
+      "source": "./plugin",
+      "description": "Herdr skills: a markdown whiteboard shown in a Herdr pane, and how to change Herdr mods without touching the live window"
+    }
+  ]
+}
